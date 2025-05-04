@@ -5,6 +5,11 @@ from pathlib import Path
 from unittest.mock import patch, mock_open, MagicMock
 from datetime import datetime
 
+# Add project root to sys.path to allow absolute imports
+import sys
+project_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_root))
+
 # Modules to test
 from src.core.storage_manager import (
     LocalStorageManager,
@@ -13,143 +18,133 @@ from src.core.storage_manager import (
     save_settings,
     get_storage_manager,
     initialize_storage_manager,
-    SCOPES
+    SCOPES,
+    USER_CONFIG_DIR # Import for checking paths
 )
+from google.oauth2.credentials import Credentials
 
 # --- Test Fixtures ---
+
 @pytest.fixture
-def mock_settings_file(tmp_path):
-    settings_dir = tmp_path / "config"
-    settings_dir.mkdir()
-    settings_file = settings_dir / "settings.json"
-    default_settings = {
+def default_settings_values():
+    """Provides the expected default settings dictionary (updated token file)."""
+    return {
         "storage_mode": "local",
-        "google_drive_credentials_file": "creds.json",
-        "google_drive_token_file": "tok.pickle",
-        "google_drive_folder_name": "Test Folder",
-        "history_filename": "test_history.json"
+        "local_storage_path": None,
+        "google_drive_credentials_file": "credentials.json",
+        "google_drive_token_file": "token.json", # Updated default
+        "google_drive_folder_name": "Jarvis-Core History",
+        "history_filename": "jarvis_chat_history.json",
+        "llm_model_path": None,
+        "system_prompt_path": None
     }
-    settings_file.write_text(json.dumps(default_settings))
-    return settings_file
 
 @pytest.fixture
-def mock_home_dir(tmp_path):
-    home = tmp_path / "user_home"
-    home.mkdir()
-    jarvis_dir = home / ".jarvis-core"
-    jarvis_dir.mkdir()
-    history_dir = jarvis_dir / "history"
-    history_dir.mkdir()
-    return home
+def mock_settings_file_path(tmp_path):
+    """Provides a mock path for the settings file within a temporary directory."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True)
+    settings_file_path = config_dir / "settings.json"
+    return settings_file_path
 
-# --- Test load_settings & save_settings ---
+@pytest.fixture
+def mock_user_config_dir(tmp_path):
+    """Provides a mock path for the user config directory."""
+    user_dir = tmp_path / ".jarvis-core"
+    user_dir.mkdir(parents=True)
+    return user_dir
 
-@patch("src.core.storage_manager.Path")
-@patch("pathlib.Path.exists") # Patch exists globally
-@patch("builtins.open", new_callable=mock_open)
-def test_load_settings_success(mock_file_open, mock_exists, mock_path, mock_settings_file):
-    """Test loading settings from an existing file."""
-    # Mock Path().resolve().parent.parent to point to tmp_path
-    settings_path_obj = mock_settings_file.parent.parent / "config" / "settings.json"
-    mock_path.return_value.resolve.return_value.parent.parent.__truediv__.return_value.__truediv__.return_value = settings_path_obj
-    # Configure mock_exists
-    mock_exists.side_effect = lambda *args: args[0] == settings_path_obj if args and isinstance(args[0], Path) else False
-    # Configure mock_open to read the content of mock_settings_file
-    mock_file_open.return_value.read.return_value = mock_settings_file.read_text()
+# --- Test load_settings & save_settings (Simplified, main tests in test_settings_logic.py) ---
+# These tests are slightly redundant with test_settings_logic.py but kept for structure
 
-    settings = load_settings()
+@patch("src.core.storage_manager.get_resource_path")
+@patch("pathlib.Path.exists")
+def test_load_settings_success_in_storage_manager(
+    mock_exists,
+    mock_get_resource_path,
+    mock_settings_file_path,
+    default_settings_values
+):
+    """Test loading settings works via get_resource_path."""
+    mock_get_resource_path.return_value = mock_settings_file_path
+    mock_exists.return_value = True
+    custom_settings = {"storage_mode": "google_drive"}
+    with patch("builtins.open", mock_open(read_data=json.dumps(custom_settings))):
+        settings = load_settings()
+    
+    mock_get_resource_path.assert_called_once_with("config/settings.json")
+    mock_exists.assert_called_once_with(mock_settings_file_path)
+    expected = default_settings_values.copy()
+    expected.update(custom_settings)
+    assert settings == expected
 
-    # Assertions
-    mock_exists.assert_called_with(settings_path_obj)
-    mock_file_open.assert_called_once_with(settings_path_obj, "r", encoding="utf-8")
-    assert settings["storage_mode"] == "local"
-    assert settings["history_filename"] == "test_history.json" # Should now match the file
-
-@patch("src.core.storage_manager.Path")
-@patch("pathlib.Path.exists") # Patch exists globally
-def test_load_settings_file_not_found(mock_exists, mock_path, tmp_path):
-    """Test loading settings when the file doesn\t exist."""
-    settings_path_obj = tmp_path / "config" / "settings.json"
-    mock_path.return_value.resolve.return_value.parent.parent.__truediv__.return_value.__truediv__.return_value = settings_path_obj
-    # Configure mock_exists to always return False
-    mock_exists.return_value = False
-
-    settings = load_settings()
-    assert settings["storage_mode"] == "local" # Default value
-    assert "google_drive_credentials_file" in settings # Default key exists
-
-@patch("src.core.storage_manager.Path")
-@patch("pathlib.Path.exists") # Patch exists globally
-def test_load_settings_invalid_json(mock_exists, mock_path, tmp_path):
-    """Test loading settings from a file with invalid JSON."""
-    settings_dir = tmp_path / "config"
-    settings_dir.mkdir()
-    settings_file = settings_dir / "settings.json"
-    settings_file.write_text("invalid json")
-
-    settings_path_obj = tmp_path / "config" / "settings.json"
-    mock_path.return_value.resolve.return_value.parent.parent.__truediv__.return_value.__truediv__.return_value = settings_path_obj
-       # Configure mock_exists to return True for the settings file
-    mock_exists.side_effect = lambda *args: args[0] == settings_path_obj if args and isinstance(args[0], Path) else Falseath_obj if args and isinstance(args[0], Path) else False
-
-    settings = load_settings()
-    assert settings["storage_mode"] == "local" # Default value
-
-@patch("src.core.storage_manager.Path")
+@patch("src.core.storage_manager.get_resource_path")
+@patch("pathlib.Path.mkdir")
 @patch("builtins.open", new_callable=mock_open)
 @patch("json.dump")
-def test_save_settings(mock_json_dump, mock_file_open, mock_path, tmp_path):
-    """Test saving settings to a file."""
-    # Define the expected path object
-    settings_path_obj = tmp_path / "config" / "settings.json"
+def test_save_settings_in_storage_manager(
+    mock_json_dump,
+    mock_file_open,
+    mock_mkdir,
+    mock_get_resource_path,
+    mock_settings_file_path
+):
+    """Test saving settings works via get_resource_path."""
+    mock_get_resource_path.return_value = mock_settings_file_path
+    settings_to_save = {"key": "value"}
+    save_settings(settings_to_save)
+    mock_get_resource_path.assert_called_once_with("config/settings.json")
+    mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
+    mock_file_open.assert_called_once_with(mock_settings_file_path, "w", encoding="utf-8")
+    mock_json_dump.assert_called_once_with(settings_to_save, mock_file_open(), indent=4, ensure_ascii=False)
 
-    # Mock the Path object construction within save_settings
-    # When Path(__file__) is called, make it return a mock
-    # that leads to settings_path_obj after resolve().parent.parent...
-    mock_path_instance = MagicMock()
-    # Ensure the chained calls return the final path object
-    mock_path_instance.resolve.return_value.parent.parent.__truediv__.return_value.__truediv__.return_value = settings_path_obj
-    mock_path.return_value = mock_path_instance # Mock Path(__file__)
-
-    new_settings = {"storage_mode": "google_drive", "history_filename": "new_hist.json"}
-    save_settings(new_settings)
-
-    # Check that open was called with the correct path object
-    mock_file_open.assert_called_once_with(settings_path_obj, "w", encoding="utf-8")
-    mock_json_dump.assert_called_once_with(new_settings, mock_file_open(), indent=4, ensure_ascii=False)
 # --- Test LocalStorageManager ---
 
-@patch("src.core.storage_manager.Path")
-def test_local_storage_init(mock_path):
-    """Test LocalStorageManager initialization creates directory."""
-    # Create mocks for the path components
-    mock_home = MagicMock(spec=Path)
-    mock_jarvis_dir = MagicMock(spec=Path)
-    mock_history_dir = MagicMock(spec=Path)
-    mock_final_filepath = MagicMock(spec=Path)
+@patch("src.core.storage_manager.Path.home") # Mock Path.home specifically
+def test_local_storage_init_default_path(mock_path_home, mock_user_config_dir):
+    """Test LocalStorageManager initialization uses default path correctly."""
+    # Configure Path.home() to return the parent of our mock user config dir
+    mock_path_home.return_value = mock_user_config_dir.parent 
+    expected_history_dir = mock_user_config_dir / "history"
+    expected_filepath = expected_history_dir / "local_test.json"
 
-    # Configure the chain of calls
-    mock_path.home.return_value = mock_home
-    mock_home.__truediv__.return_value = mock_jarvis_dir
-    mock_jarvis_dir.__truediv__.return_value = mock_history_dir
-    mock_history_dir.__truediv__.return_value = mock_final_filepath # For self.filepath = self.history_dir / filename
+    # Mock mkdir on the expected history directory path object
+    with patch.object(Path, "mkdir") as mock_mkdir:
+        manager = LocalStorageManager(filename="local_test.json")
 
-    # Instantiate the manager - this triggers the path creation and mkdir
-    manager = LocalStorageManager(filename="local_test.json")
+    mock_path_home.assert_called_once()
+    # Assert mkdir was called on the correct path
+    # Need to find the instance Path was called on
+    # Let's check the final path attribute instead
+    assert manager.history_dir == expected_history_dir
+    assert manager.filepath == expected_filepath
+    # Check mkdir was called (might be called multiple times if parents=True)
+    assert mock_mkdir.called
+    # Check the specific call to the history dir
+    mock_mkdir.assert_any_call(parents=True, exist_ok=True)
 
-    # Assertions
-    mock_path.home.assert_called_once()
-    mock_home.__truediv__.assert_called_once_with(".jarvis-core")
-    mock_jarvis_dir.__truediv__.assert_called_once_with("history")
-    mock_history_dir.mkdir.assert_called_once_with(parents=True, exist_ok=True)
-    # Check filepath assignment
-    mock_history_dir.__truediv__.assert_called_with("local_test.json")
-    assert manager.filepath == mock_final_filepath
-@patch("builtins.open", new_callable=mock_open, read_data='[{"sender": "Old", "message": "Msg"}]') # Corrected string literal
+@patch("src.core.storage_manager.Path.home") # Mock Path.home to avoid real home access
+def test_local_storage_init_custom_path(mock_path_home, tmp_path):
+    """Test LocalStorageManager initialization uses custom path."""
+    custom_path_str = str(tmp_path / "custom_local_storage")
+    custom_path = Path(custom_path_str)
+    expected_filepath = custom_path / "custom_file.json"
+
+    # Mock mkdir on the expected custom path object
+    with patch.object(Path, "mkdir") as mock_mkdir:
+        manager = LocalStorageManager(filename="custom_file.json", storage_path=custom_path_str)
+
+    mock_path_home.assert_not_called() # Home should not be used for custom path
+    assert manager.history_dir == custom_path.resolve()
+    assert manager.filepath == expected_filepath
+    mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
+
+@patch("src.core.storage_manager.Path.home")
+@patch("builtins.open", new_callable=mock_open, read_data=\"[{\"sender\": \"Old\", \"message\": \"Msg\"}]\")
 @patch("json.dump")
-def test_local_storage_save_message(mock_json_dump, mock_file_open, mock_path, mock_home_dir):
-    """Test saving a message with LocalStorageManager."""
-    mock_path.home.return_value = mock_home_dir
+def test_local_storage_save_message(mock_json_dump, mock_file_open, mock_path_home, mock_user_config_dir):
+    """Test saving a message with LocalStorageManager (default path)."""
+    mock_path_home.return_value = mock_user_config_dir.parent
     manager = LocalStorageManager(filename="local_test.json")
     filepath = manager.filepath
 
@@ -164,126 +159,175 @@ def test_local_storage_save_message(mock_json_dump, mock_file_open, mock_path, m
     args, kwargs = mock_json_dump.call_args
     saved_history = args[0]
     assert len(saved_history) == 2
-    assert saved_history[0]["sender"] == "Old"
-    assert saved_history[1]["sender"] == "User"
-    assert saved_history[1]["message"] == "Hello"
-    assert "timestamp" in saved_history[1]
+    assert saved_history[0][\"sender\"] == \"Old\"
+    assert saved_history[1][\"sender\"] == \"User\"
+    assert saved_history[1][\"message\"] == \"Hello\"
+    assert \"timestamp\" in saved_history[1]
 
-@patch("src.core.storage_manager.Path")
-@patch("builtins.open", new_callable=mock_open, read_data='[{"sender": "User", "message": "Hi"}]')
-@patch("pathlib.Path.exists") # Patch exists globally for this test
-def test_local_storage_load_history_success(mock_exists, mock_file_open, mock_path, mock_home_dir):
+@patch("src.core.storage_manager.Path.home")
+@patch("builtins.open", new_callable=mock_open, read_data=\"[{\"sender\": \"User\", \"message\": \"Hi\"}]\")
+@patch("pathlib.Path.exists")
+def test_local_storage_load_history_success(mock_exists, mock_file_open, mock_path_home, mock_user_config_dir):
     """Test loading history successfully."""
-    mock_path.home.return_value = mock_home_dir
+    mock_path_home.return_value = mock_user_config_dir.parent
     manager = LocalStorageManager(filename="local_test.json")
-    # Configure the mock to always return True for this test
-    mock_exists.return_value = True
+    filepath = manager.filepath
+    
+    # Configure mock_exists to return True for the specific filepath
+    mock_exists.side_effect = lambda p: p == filepath
 
     history = manager.load_history()
 
-    # Check that exists was called on the correct path
-    # We need manager.filepath to be constructed correctly first
-    # Let's assume manager init worked and filepath is set
-    # Find the actual path object used inside the function if possible, or mock more carefully
-    # For now, let's check open was called
-    mock_file_open.assert_called_once_with(manager.filepath, "r", encoding="utf-8")
+    mock_exists.assert_called_with(filepath)
+    mock_file_open.assert_called_once_with(filepath, "r", encoding="utf-8")
     assert len(history) == 1
-    assert history[0]["sender"] == "User"
-@patch("src.core.storage_manager.Path")
-@patch("pathlib.Path.exists") # Patch exists globally
-def test_local_storage_load_history_file_not_found(mock_exists, mock_path, mock_home_dir):
+    assert history[0][\"sender\"] == \"User\"
+
+@patch("src.core.storage_manager.Path.home")
+@patch("pathlib.Path.exists")
+def test_local_storage_load_history_file_not_found(mock_exists, mock_path_home, mock_user_config_dir):
     """Test loading history when file doesn\t exist."""
-    mock_path.home.return_value = mock_home_dir
+    mock_path_home.return_value = mock_user_config_dir.parent
     manager = LocalStorageManager(filename="local_test.json")
-    # Configure mock to always return False for this test
+    filepath = manager.filepath
     mock_exists.return_value = False
 
     history = manager.load_history()
+    mock_exists.assert_called_with(filepath)
     assert history == []
 
-@patch("src.core.storage_manager.Path")
+@patch("src.core.storage_manager.Path.home")
 @patch("builtins.open", new_callable=mock_open, read_data="invalid json")
-@patch("pathlib.Path.exists") # Patch exists globally
-def test_local_storage_load_history_invalid_json(mock_exists, mock_file_open, mock_path, mock_home_dir):
+@patch("pathlib.Path.exists")
+def test_local_storage_load_history_invalid_json(mock_exists, mock_file_open, mock_path_home, mock_user_config_dir):
     """Test loading history with invalid JSON."""
-    mock_path.home.return_value = mock_home_dir
+    mock_path_home.return_value = mock_user_config_dir.parent
     manager = LocalStorageManager(filename="local_test.json")
-    # Configure mock to return True for the specific filepath
-    mock_exists.side_effect = lambda *args: args[0] == manager.filepath if args and isinstance(args[0], Path) else False
+    filepath = manager.filepath
+    mock_exists.return_value = True
 
     history = manager.load_history()
+    mock_exists.assert_called_with(filepath)
+    mock_file_open.assert_called_once_with(filepath, "r", encoding="utf-8")
     assert history == []
 
-# --- Test GoogleDriveStorageManager (Basic Init & Auth Trigger) ---
-# Full testing is hard due to OAuth flow, focus on structure
+# --- Test GoogleDriveStorageManager ---
 
+@patch("src.core.storage_manager.get_resource_path")
 @patch("src.core.storage_manager.os.getenv")
-@patch("src.core.storage_manager.Path")
-def test_gdrive_storage_init(mock_path, mock_getenv, mock_home_dir):
-    """Test GoogleDriveStorageManager initialization."""
-    mock_getenv.return_value = "path/to/creds.json"
-    mock_path.home.return_value = mock_home_dir
-    mock_path.return_value.resolve.return_value = Path("/resolved/path/to/creds.json")
+@patch("src.core.storage_manager.Path.home")
+def test_gdrive_storage_init_paths(
+    mock_path_home,
+    mock_getenv,
+    mock_get_resource_path,
+    mock_user_config_dir # Fixture for ~/.jarvis-core
+):
+    """Test GoogleDriveStorageManager initialization sets paths correctly."""
+    # Arrange
+    mock_path_home.return_value = mock_user_config_dir.parent # Set home for USER_CONFIG_DIR
+    mock_getenv.return_value = None # Use default credentials file name
+    
+    # Mock get_resource_path used for default credentials path
+    mock_default_creds_path = Path("/mock/project/root/credentials.json")
+    mock_get_resource_path.return_value = mock_default_creds_path
 
+    # Act
     manager = GoogleDriveStorageManager(
-        credentials_file="creds.json",
-        token_file="gdrive_token.pickle",
+        credentials_file="credentials.json", # Default name
+        token_file="my_token.json",
         filename="gdrive_hist.json",
         folder_name="GDrive Test"
     )
 
-    assert manager.token_path == mock_home_dir / ".jarvis-core" / "gdrive_token.pickle"
-    assert manager.credentials_path == Path("/resolved/path/to/creds.json")
+    # Assert
+    mock_path_home.assert_called() # Called to establish USER_CONFIG_DIR
+    mock_getenv.assert_called_once_with("GOOGLE_DRIVE_CREDENTIALS_FILE", "credentials.json")
+    # Check get_resource_path was called for the default credentials file
+    mock_get_resource_path.assert_called_once_with("credentials.json")
+    
+    assert manager.token_path == mock_user_config_dir / "my_token.json"
+    assert manager.credentials_path == mock_default_creds_path
     assert manager.filename == "gdrive_hist.json"
     assert manager.folder_name == "GDrive Test"
-    assert manager.service is None # Not authenticated yet
+    assert manager.service is None
     assert manager.file_id is None
 
 @patch("src.core.storage_manager.GoogleDriveStorageManager._ensure_file_exists")
 @patch("src.core.storage_manager.build")
-@patch("pickle.dump")
+@patch("src.core.storage_manager.Credentials.from_authorized_user_file")
 @patch("builtins.open", new_callable=mock_open)
 @patch("src.core.storage_manager.InstalledAppFlow")
-@patch("src.core.storage_manager.Path")
-@patch("pathlib.Path.exists") # Patch exists globally
-def test_gdrive_storage_authenticate_new_token(mock_exists, mock_path, mock_flow, mock_file_open, mock_pickle_dump, mock_build, mock_ensure_file, mock_home_dir):
-    """Test the authentication flow when no token exists."""
-    mock_path.home.return_value = mock_home_dir
-    token_path = mock_home_dir / ".jarvis-core" / "gdrive_token.pickle"
-    creds_path = Path("/path/to/creds.json") # Use a dummy Path for comparison
-    mock_path.return_value.resolve.return_value = creds_path # Mock resolution
+@patch("src.core.storage_manager.Path.home")
+@patch("pathlib.Path.exists")
+@patch("src.core.storage_manager.get_resource_path") # Mock resource path for creds
+def test_gdrive_storage_authenticate_new_token_json(
+    mock_get_resource_path,
+    mock_exists,
+    mock_path_home,
+    mock_flow,
+    mock_file_open,
+    mock_creds_from_file, # Mock for loading JSON token
+    mock_build,
+    mock_ensure_file,
+    mock_user_config_dir
+):
+    """Test the authentication flow using JSON token when no token exists."""
+    # Arrange
+    mock_path_home.return_value = mock_user_config_dir.parent
+    token_path = mock_user_config_dir / "token.json"
+    creds_path = Path("/mock/project/root/credentials.json")
+    mock_get_resource_path.return_value = creds_path # Mock resolution for credentials
 
-    # Configure mock_exists using side_effect
-    def exists_side_effect(*args):
-        path_instance = args[0] if args else None
-        if isinstance(path_instance, Path):
-            if path_instance == token_path:
-                return False # Token file does not exist
-            if path_instance == creds_path:
-                return True # Credentials file exists
+    # Configure mock_exists: token doesn't exist, credentials do
+    def exists_side_effect(path_instance):
+        if path_instance == token_path:
+            return False # Token file does not exist
+        if path_instance == creds_path:
+            return True # Credentials file exists
+        if path_instance == token_path.parent:
+             return True # Assume parent dir exists or is created
         return False # Default
     mock_exists.side_effect = exists_side_effect
 
-    mock_creds = MagicMock()
-    mock_creds.valid = True
+    # Mock the OAuth flow
+    mock_creds_obtained = MagicMock(spec=Credentials)
+    mock_creds_obtained.valid = True
+    mock_creds_obtained.expired = False
+    mock_creds_obtained.refresh_token = "fake_refresh_token"
+    # Mock the to_json method needed for saving
+    mock_creds_obtained.to_json.return_value = \"{\"token\": \"mock_token_data\"}\"
+    
     mock_flow_instance = mock_flow.from_client_secrets_file.return_value
-    mock_flow_instance.run_local_server.return_value = mock_creds
+    mock_flow_instance.run_local_server.return_value = mock_creds_obtained
 
+    # Mock build service
     mock_service = MagicMock()
     mock_build.return_value = mock_service
 
-    manager = GoogleDriveStorageManager(token_file="gdrive_token.pickle")
-    manager.credentials_path = creds_path # Set resolved path
+    # Act
+    manager = GoogleDriveStorageManager(token_file="token.json", credentials_file="credentials.json")
+    # Manually set paths based on mocks for consistency in test
     manager.token_path = token_path
-
+    manager.credentials_path = creds_path
+    
     success = manager.authenticate()
 
+    # Assert
     assert success is True
-    mock_flow.from_client_secrets_file.assert_called_once_with(creds_path, SCOPES)
+    mock_get_resource_path.assert_called_once_with("credentials.json")
+    # Check exists called for token and credentials
+    mock_exists.assert_any_call(token_path)
+    mock_exists.assert_any_call(creds_path)
+    
+    mock_flow.from_client_secrets_file.assert_called_once_with(str(creds_path), SCOPES)
     mock_flow_instance.run_local_server.assert_called_once()
-    mock_file_open.assert_called_once_with(token_path, "wb")
-    mock_pickle_dump.assert_called_once_with(mock_creds, mock_file_open())
-    mock_build.assert_called_once_with("drive", "v3", credentials=mock_creds)
+    
+    # Assert file was opened to *write* the new JSON token
+    mock_file_open.assert_called_once_with(token_path, "w", encoding="utf-8")
+    # Assert the JSON content was written
+    mock_file_open().write.assert_called_once_with(\"{\"token\": \"mock_token_data\"}\")
+    
+    mock_build.assert_called_once_with(\"drive\", \"v3\", credentials=mock_creds_obtained)
     assert manager.service == mock_service
     mock_ensure_file.assert_called_once() # Ensure file check happens after auth
 
@@ -292,35 +336,78 @@ def test_gdrive_storage_authenticate_new_token(mock_exists, mock_path, mock_flow
 @patch("src.core.storage_manager.LocalStorageManager")
 @patch("src.core.storage_manager.GoogleDriveStorageManager")
 @patch("src.core.storage_manager.load_settings")
-def test_initialize_storage_manager_local(mock_load_settings, mock_gdrive_init, mock_local_init):
+def test_initialize_storage_manager_local_factory(
+    mock_load_settings,
+    mock_gdrive_init,
+    mock_local_init,
+    tmp_path
+):
     """Test factory initializes Local manager based on settings."""
-    mock_load_settings.return_value = {"storage_mode": "local", "history_filename": "hist.json"}
+    custom_path = str(tmp_path / "local_hist")
+    mock_load_settings.return_value = {
+        "storage_mode": "local", 
+        "history_filename": "hist.json",
+        "local_storage_path": custom_path,
+        # Add other defaults
+        "google_drive_credentials_file": "", "google_drive_token_file": "token.json",
+        "google_drive_folder_name": "", "llm_model_path": None, "system_prompt_path": None
+    }
+    # Reset global state
+    from src.core import storage_manager
+    storage_manager._current_storage_manager = None
+    
     manager = initialize_storage_manager(force_reinit=True)
-    mock_local_init.assert_called_once_with(filename="hist.json")
+    
+    mock_load_settings.assert_called_once()
+    mock_local_init.assert_called_once_with(filename="hist.json", storage_path=custom_path)
     mock_gdrive_init.assert_not_called()
-    assert isinstance(manager, MagicMock) # It returns the mocked instance
+    assert manager == mock_local_init.return_value
+    
+    # Clean up global state
+    storage_manager._current_storage_manager = None
 
 @patch("src.core.storage_manager.LocalStorageManager")
 @patch("src.core.storage_manager.GoogleDriveStorageManager")
 @patch("src.core.storage_manager.load_settings")
-def test_initialize_storage_manager_gdrive(mock_load_settings, mock_gdrive_init, mock_local_init):
+def test_initialize_storage_manager_gdrive_factory(
+    mock_load_settings,
+    mock_gdrive_init,
+    mock_local_init
+):
     """Test factory initializes GDrive manager based on settings."""
+    # Mock the authenticate method of the GDrive manager instance
+    mock_gdrive_instance = MagicMock()
+    mock_gdrive_instance.authenticate.return_value = True # Assume auth succeeds
+    mock_gdrive_init.return_value = mock_gdrive_instance
+    
     mock_load_settings.return_value = {
         "storage_mode": "google_drive",
         "history_filename": "g_hist.json",
         "google_drive_credentials_file": "g_creds.json",
-        "google_drive_token_file": "g_tok.pickle",
-        "google_drive_folder_name": "g_folder"
+        "google_drive_token_file": "g_tok.json", # Updated token file
+        "google_drive_folder_name": "g_folder",
+        # Add other defaults
+        "local_storage_path": None, "llm_model_path": None, "system_prompt_path": None
     }
+    # Reset global state
+    from src.core import storage_manager
+    storage_manager._current_storage_manager = None
+    
     manager = initialize_storage_manager(force_reinit=True)
+    
+    mock_load_settings.assert_called_once()
     mock_gdrive_init.assert_called_once_with(
         credentials_file="g_creds.json",
-        token_file="g_tok.pickle",
+        token_file="g_tok.json", # Check for .json
         filename="g_hist.json",
         folder_name="g_folder"
     )
+    mock_gdrive_instance.authenticate.assert_called_once()
     mock_local_init.assert_not_called()
-    assert isinstance(manager, MagicMock)
+    assert manager == mock_gdrive_instance
+    
+    # Clean up global state
+    storage_manager._current_storage_manager = None
 
 @patch("src.core.storage_manager.initialize_storage_manager")
 def test_get_storage_manager_initializes_once(mock_init):

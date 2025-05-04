@@ -1,91 +1,106 @@
+# tests/test_mock_path_exists.py
 import pytest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
-# Test 1: Mocking exists directly on the instance within the test
-def test_mock_exists_instance_direct(tmp_path):
-    test_file = tmp_path / "myfile.txt"
-    # Create the file to ensure it exists physically
-    test_file.touch()
-    assert test_file.exists() # Should be True
+# Assume a helper function or fixture `mock_path_exists` will be created
+# This file tests the *concept* or a *potential implementation* of such a mock.
 
-    # Patch exists only on this specific instance
-    with patch.object(test_file, 'exists', return_value=False) as mock_exists:
-        assert not test_file.exists() # Should now be False due to mock
-        mock_exists.assert_called_once()
+# --- Example Mock Implementation (for testing the test) ---
+# In a real scenario, this would likely be in conftest.py or a utils file
 
-    # Mock should be gone now
-    assert test_file.exists() # Should be True again
-
-# Test 2: Mocking exists on the Path class using side_effect
-
-def mock_exists_side_effect(self, *args, **kwargs):
-    print(f"Mock exists called for: {self}")
-    if isinstance(self, Path):
-        # Example logic: only return True for a specific filename
-        if self.name == "specific_file.txt":
-            return True
-        return False
-    else:
-        print(f"Mock exists called on non-Path object: {self}. Returning True for safety.")
-        return True
-
-@patch('pathlib.Path.exists', side_effect=mock_exists_side_effect)
-def test_mock_exists_class_side_effect(mock_exists_method, tmp_path):
-    file1 = tmp_path / "other_file.txt"
-    file2 = tmp_path / "specific_file.txt"
-
-    assert not file1.exists()
-    assert file2.exists() # This should be True based on side_effect logic
-
-    # Check calls to the mock
-    assert mock_exists_method.call_count == 2
-
-# Test 3: Using a fixture to provide the mock (similar to storage tests)
 @pytest.fixture
-def mock_path_exists_via_fixture():
-    def _mock_logic(self, *args, **kwargs):
-        # Accept self and variable args
-        print(f"Fixture mock exists called for: {self}")
-        if isinstance(self, Path) and self.name == "fixture_file.txt":
-            return True
-        # Default to False or True? Let's try True for cleanup safety
-        print(f"Fixture mock called on non-Path or wrong name: {self}. Returning True.")
-        return True
-    
-    # Apply the patch within the fixture's scope
-    with patch('pathlib.Path.exists', side_effect=_mock_logic) as mock_method:
-        yield mock_method # Provide the mock object to the test
-    # Patch is automatically removed when the fixture scope ends
+def mock_path_exists_fixture():
+    """Provides a patcher for pathlib.Path.exists with configurable behavior."""
+    def _mock_factory(exists_map):
+        """exists_map: dict mapping Path objects or strings to boolean"""
+        # Normalize keys to resolved Path objects for reliable matching
+        normalized_map = {Path(p).resolve(): v for p, v in exists_map.items()}
 
-def test_with_mock_fixture(mock_path_exists_via_fixture, tmp_path):
-    file1 = tmp_path / "another_file.txt"
-    file2 = tmp_path / "fixture_file.txt"
+        def _mock_exists(path_instance):
+            resolved_path = path_instance.resolve()
+            # print(f"DEBUG: Mock exists called for: {resolved_path}") # Debug print
+            # print(f"DEBUG: Checking against map: {normalized_map}") # Debug print
+            return normalized_map.get(resolved_path, False) # Default to False if not in map
 
-    assert not file1.exists()
-    assert file2.exists()
+        return patch("pathlib.Path.exists", side_effect=_mock_exists, autospec=True)
+    return _mock_factory
 
-    assert mock_path_exists_via_fixture.call_count == 2
+# --- Tests for the Mocking Logic ---
 
-# Test 4: Patching within the test using a context manager
-def test_mock_exists_context_manager(tmp_path):
-    file1 = tmp_path / "context_file.txt"
-    file2 = tmp_path / "special_context.txt"
+def test_mock_path_exists_positive(mock_path_exists_fixture, tmp_path):
+    """Test that the mock correctly reports a path as existing."""
+    test_file = tmp_path / "real_file.txt"
+    # Note: We don't actually create the file on disk
 
-    def _mock_logic(self, *args, **kwargs):
-         print(f"Context Manager mock exists called for: {self}")
-         if isinstance(self, Path) and self.name == "special_context.txt":
-             return True
-         print(f"Context Manager mock called on non-Path or wrong name: {self}. Returning True.")
-         return True
+    exists_map = {str(test_file): True}
 
-    with patch('pathlib.Path.exists', side_effect=_mock_logic) as mock_method:
-        assert not file1.exists()
-        assert file2.exists()
-        assert mock_method.call_count == 2
+    with mock_path_exists_fixture(exists_map):
+        # Inside this block, Path.exists is mocked
+        p = Path(str(test_file))
+        assert p.exists() is True
 
-    # Verify mock is removed outside the context
-    file1.touch() # Create the file physically
-    assert file1.exists() # Should now be True (mock is gone)
+    # Outside the block, the mock is removed (if patching worked correctly)
+    # assert not Path(str(test_file)).exists() # This check depends on the real FS
 
+def test_mock_path_exists_negative(mock_path_exists_fixture, tmp_path):
+    """Test that the mock correctly reports a path as not existing."""
+    test_file = tmp_path / "non_existent_file.txt"
+    # File does not exist on disk, and the map also says it doesn't
+
+    exists_map = {str(test_file): False} # Explicitly False
+
+    with mock_path_exists_fixture(exists_map):
+        p = Path(str(test_file))
+        assert p.exists() is False
+
+def test_mock_path_exists_not_in_map(mock_path_exists_fixture, tmp_path):
+    """Test that the mock reports False for paths not in the map."""
+    test_file = tmp_path / "some_other_file.txt"
+    mapped_file = tmp_path / "mapped_file.txt"
+
+    exists_map = {str(mapped_file): True} # Only map this file
+
+    with mock_path_exists_fixture(exists_map):
+        p_other = Path(str(test_file))
+        p_mapped = Path(str(mapped_file))
+        assert p_other.exists() is False # Should default to False
+        assert p_mapped.exists() is True # Should be True as per map
+
+def test_mock_path_exists_multiple_paths(mock_path_exists_fixture, tmp_path):
+    """Test the mock with multiple paths in the map."""
+    file_exists = tmp_path / "exists.txt"
+    file_not_exists = tmp_path / "not_exists.txt"
+    file_unmapped = tmp_path / "unmapped.txt"
+
+    exists_map = {
+        str(file_exists): True,
+        str(file_not_exists): False,
+    }
+
+    with mock_path_exists_fixture(exists_map):
+        p_exists = Path(str(file_exists))
+        p_not_exists = Path(str(file_not_exists))
+        p_unmapped = Path(str(file_unmapped))
+
+        assert p_exists.exists() is True
+        assert p_not_exists.exists() is False
+        assert p_unmapped.exists() is False
+
+# Example of how to use it in another test file (conceptual)
+# def test_some_functionality(mock_path_exists_fixture, tmp_path):
+#     config_path = tmp_path / "config.json"
+#     data_path = tmp_path / "data.dat"
+#
+#     # Simulate config exists, data does not
+#     exists_map = {
+#         str(config_path): True,
+#         str(data_path): False
+#     }
+#
+#     with mock_path_exists_fixture(exists_map):
+#         # Call the function under test that uses Path.exists()
+#         result = function_under_test(config_path, data_path)
+#         # Add assertions based on the expected behavior given the mocked paths
+#         assert result == "expected_outcome"
 

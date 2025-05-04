@@ -1,41 +1,26 @@
-# Core Dependencies from Blueprint
-langchain
+# Core Dependencies
+langchain==0.2.1
 langchain-community
 gpt4all
 pyperclip
-faiss-cpu # Use faiss-gpu if USE_GPU=1 and CUDA is installed
+faiss-cpu==1.8.0
 numpy
-boto3 # For optional S3 sync, keep for now
-python-dotenv # For loading .env file
-PyYAML # For loading config/app_paths.yaml
-
-# GUI Dependencies (To be added in Phase 2)
-# e.g., customtkinter
-
-# Google Drive API (To be added in Phase 3)
-# e.g., google-api-python-client google-auth-httplib2 google-auth-oauthlib
-
-# Testing Dependencies
-pytest
-
-
+boto3
+python-dotenv
+PyYAML
 
 # GUI Framework
 customtkinter
-
 
 # Google Drive Integration
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 
-
-# Google Drive Storage
-google-api-python-client
-google-auth-oauthlib
-
-
 # Automatic Model Download
 huggingface_hub
 tqdm
+
+# Testing Dependencies
+pytest
 

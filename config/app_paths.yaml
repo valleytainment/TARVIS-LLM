@@ -3,7 +3,21 @@ open_app:
     Windows:
       firefox: "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
       code: "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
-      # Add more common Windows application paths here as needed
       notepad: "C:\\Windows\\System32\\notepad.exe"
       explorer: "C:\\Windows\\explorer.exe"
+      # Add more Windows paths here
+
+    Linux:
+      firefox: "/usr/bin/firefox"
+      code: "/usr/bin/code" # Often installed via snap/flatpak, might need shutil.which fallback
+      gedit: "/usr/bin/gedit"
+      nautilus: "/usr/bin/nautilus" # Default GNOME file manager
+      # Add more Linux paths here
+
+    Darwin: # macOS
+      firefox: "/Applications/Firefox.app/Contents/MacOS/firefox"
+      code: "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+      textedit: "/System/Applications/TextEdit.app/Contents/MacOS/TextEdit"
+      finder: "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"
+      # Add more macOS paths here
 
