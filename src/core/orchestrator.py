@@ -1,5 +1,7 @@
 import os
 import logging
+import importlib
+import inspect
 from pathlib import Path
 from langchain.agents import Tool, initialize_agent, AgentType
 from langchain.chains.conversation.memory import ConversationBufferMemory
@@ -11,17 +13,14 @@ from dotenv import load_dotenv
 from .llm_manager import LLMLoader
 from .storage_manager import load_settings # Import load_settings
 
-# Import skill functions - these files will be created in the next steps
-# We will define placeholder functions for now if needed for testing, 
-# or structure the code to load them dynamically later.
-# from ..skills import open_app, file_ops, clipboard # Corrected relative import
-
 # Load environment variables
 load_dotenv()
 
-# Configure logginglogging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 class Orchestrator:
-    """Manages the interaction flow, loading the LLM and routing commands to appropriate skills."""
+    """Manages the interaction flow, loading the LLM and routing commands to dynamically loaded skills."""
 
     def __init__(self):
         """Initializes the Orchestrator, loading the LLM, tools, memory, and custom prompt."""
@@ -62,17 +61,29 @@ class Orchestrator:
     def _load_system_prompt(self) -> str:
         """Loads the system prompt from the path specified in settings or default."""
         custom_prompt_path_str = self.settings.get("system_prompt_path")
-        default_prompt_path = Path(__file__).resolve().parent.parent / "config" / "prompts" / "system_prompt.txt"
+        # Use resource_path utility if available, otherwise fallback
+        try:
+            from ..utils.resource_path import get_resource_path
+            default_prompt_path = get_resource_path(Path("config") / "prompts" / "system_prompt.txt")
+        except ImportError:
+            logging.warning("resource_path utility not found, using relative path for default prompt.")
+            default_prompt_path = Path(__file__).resolve().parent.parent / "config" / "prompts" / "system_prompt.txt"
+            
         prompt_path = default_prompt_path
 
         if custom_prompt_path_str:
             try:
-                custom_prompt_path = Path(custom_prompt_path_str).resolve()
+                # Resolve custom path relative to project root if not absolute
+                custom_prompt_path = Path(custom_prompt_path_str)
+                if not custom_prompt_path.is_absolute():
+                     project_root = Path(__file__).resolve().parent.parent.parent
+                     custom_prompt_path = project_root / custom_prompt_path
+                
                 if custom_prompt_path.is_file():
-                    prompt_path = custom_prompt_path
+                    prompt_path = custom_prompt_path.resolve()
                     logging.info(f"Using custom system prompt from: {prompt_path}")
                 else:
-                    logging.warning(f"Custom system prompt path \"{custom_prompt_path_str}\" not found. Using default prompt.")
+                    logging.warning(f"Custom system prompt path \"{custom_prompt_path_str}\" (resolved to {custom_prompt_path}) not found. Using default prompt.")
             except Exception as e:
                 logging.error(f"Error resolving custom prompt path \"{custom_prompt_path_str}\": {e}. Using default prompt.")
         else:
@@ -86,51 +97,57 @@ class Orchestrator:
             return "You are a helpful AI assistant." # Basic fallback prompt
 
     def _load_tools(self):
-        """Loads the available skills as tools for the LangChain agent."""
-        logging.info("Loading tools...")
+        """Dynamically loads tools from skill modules in the src/skills directory."""
+        logging.info("Dynamically loading tools from src/skills...")
         tools_list = []
-        try:
-            # Dynamically import skills to avoid errors if files don't exist yet
-            # These imports assume the skill modules are in ../skills/
-            from ..skills import open_app, file_ops, clipboard
+        skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        
+        if not skills_dir.is_dir():
+            logging.warning(f"Skills directory not found at {skills_dir}. No tools will be loaded.")
+            return []
 
-            # Define tools based on the blueprint
-            tools_list = [
-                Tool(
-                    name="open_application",
-                    func=open_app.execute, # Assumes an execute function in open_app.py
-                    description="Opens or launches a specified application on the computer (e.g., Firefox, Notepad, VS Code). Input should be the name of the application."
-                ),
-                Tool(
-                    name="copy_file",
-                    func=file_ops.copy_file, # Assumes copy_file function in file_ops.py
-                    description="Copies a file from a source path to a destination path. Input should be the source and destination paths."
-                ),
-                Tool(
-                    name="delete_file",
-                    func=file_ops.delete_file, # Assumes delete_file function in file_ops.py
-                    description="Deletes a file at the specified path. Input should be the path to the file."
-                ),
-                Tool(
-                    name="write_to_clipboard",
-                    func=clipboard.write, # Assumes write function in clipboard.py
-                    description="Writes the given text content to the system clipboard. Input should be the text to write."
-                ),
-                Tool(
-                    name="read_from_clipboard",
-                    func=clipboard.read, # Assumes read function in clipboard.py
-                    description="Reads the current text content from the system clipboard. Takes no input."
-                )
-                # Add more tools here as skills are developed
-            ]
-            logging.info(f"Successfully loaded {len(tools_list)} tools.")
-        except ImportError as e:
-            logging.warning(f"Could not import one or more skill modules: {e}. Agent will have limited tools.")
-        except AttributeError as e:
-            logging.warning(f"A skill module is missing an expected function: {e}. Check skill implementations.")
-        except Exception as e:
-            logging.error(f"An unexpected error occurred while loading tools: {e}", exc_info=True)
+        for filepath in skills_dir.glob("*.py"):
+            if filepath.name == "__init__.py":
+                continue
 
+            module_name = filepath.stem
+            try:
+                # Construct the full module path relative to the project structure (e.g., src.skills.open_app)
+                module_spec = f"src.skills.{module_name}"
+                skill_module = importlib.import_module(module_spec)
+                logging.debug(f"Imported skill module: {module_spec}")
+
+                # Look for a function named 'get_tool' or 'get_tools'
+                get_tool_func = None
+                if hasattr(skill_module, "get_tool") and callable(skill_module.get_tool):
+                    get_tool_func = skill_module.get_tool
+                elif hasattr(skill_module, "get_tools") and callable(skill_module.get_tools):
+                     # Handle case where a module might provide multiple tools
+                     get_tool_func = skill_module.get_tools 
+                
+                if get_tool_func:
+                    tools_or_tool = get_tool_func()
+                    if isinstance(tools_or_tool, list):
+                        tools_list.extend(tools_or_tool)
+                        logging.info(f"Loaded {len(tools_or_tool)} tools from {module_name}.py")
+                    elif isinstance(tools_or_tool, Tool):
+                        tools_list.append(tools_or_tool)
+                        logging.info(f"Loaded tool from {module_name}.py")
+                    else:
+                        logging.warning(f"Function 'get_tool(s)' in {module_name}.py did not return a Tool or list of Tools.")
+                else:
+                    logging.warning(f"No 'get_tool' or 'get_tools' function found in {module_name}.py. Skipping.")
+
+            except ImportError as e:
+                logging.error(f"Failed to import skill module {module_name}: {e}", exc_info=True)
+            except Exception as e:
+                logging.error(f"Error loading tools from {module_name}.py: {e}", exc_info=True)
+
+        if not tools_list:
+            logging.warning("No tools were loaded. The agent might not be able to perform specific actions.")
+        else:
+            logging.info(f"Successfully loaded {len(tools_list)} tools in total.")
+            
         return tools_list
 
     def route_command(self, user_input: str):
@@ -163,6 +180,7 @@ if __name__ == "__main__":
         orchestrator = Orchestrator()
         if orchestrator.agent:
             print("Orchestrator initialized.")
+            print(f"Loaded tools: {[tool.name for tool in orchestrator.tools]}")
             # Example command (will likely fail if LLM/skills not fully set up)
             # command = "Open notepad"
             # print(f"Sending command: {command}")

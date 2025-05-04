@@ -1,5 +1,6 @@
 import pyperclip
 import logging
+from langchain.agents import Tool # Import Tool
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -50,9 +51,29 @@ def read() -> str:
         logging.error(f"Unexpected error during read: {error_msg}", exc_info=True)
         return error_msg
 
+# --- Tool Definition --- 
+def get_tools() -> list[Tool]:
+    """Returns a list of LangChain Tool objects for this skill module."""
+    return [
+        Tool(
+            name="write_to_clipboard",
+            func=write,
+            description="Writes the given text content to the system clipboard. Input should be the text to write."
+        ),
+        Tool(
+            name="read_from_clipboard",
+            func=read,
+            description="Reads the current text content from the system clipboard. Takes no input."
+        )
+    ]
+
 # Example usage remains the same
 if __name__ == "__main__":
     print("Testing clipboard skill...")
+    # Test tool creation
+    tools = get_tools()
+    print(f"Loaded tools: {[tool.name for tool in tools]}")
+    
     test_text = "Hello from Jarvis-Core clipboard test!"
     
     write_result = write(test_text)

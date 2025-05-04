@@ -6,10 +6,14 @@ import threading
 import queue
 import logging
 from pathlib import Path # Added for path handling
+import time # For STT toggle logic
 
 # Import backend components
 from src.core.orchestrator import Orchestrator
 from src.core.storage_manager import get_storage_manager, save_settings, load_settings, GoogleDriveStorageManager, initialize_storage_manager
+# Import speech components
+from src.speech.stt import SpeechToText
+from src.speech.tts import TextToSpeech
 
 # Configure basic logging for the GUI
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - GUI - %(message)s")
@@ -33,6 +37,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.local_storage_path_var = ctk.StringVar(value=self.settings.get("local_storage_path") or "") 
         self.llm_model_path_var = ctk.StringVar(value=self.settings.get("llm_model_path") or "")
         self.system_prompt_path_var = ctk.StringVar(value=self.settings.get("system_prompt_path") or "")
+        # TODO: Add settings for STT/TTS models/devices if needed
 
         # --- Title ---
         title_label = ctk.CTkLabel(self, text="Application Settings", font=ctk.CTkFont(size=16, weight="bold"))
@@ -43,6 +48,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.tab_view.pack(pady=10, padx=20, fill="both", expand=True)
         self.tab_view.add("Storage")
         self.tab_view.add("Model & Prompt")
+        # TODO: Add "Speech" tab for STT/TTS settings
 
         # --- Storage Tab --- 
         storage_tab = self.tab_view.tab("Storage")
@@ -84,7 +90,7 @@ class SettingsWindow(ctk.CTkToplevel):
         llm_path_entry_frame = ctk.CTkFrame(llm_path_frame, fg_color="transparent")
         llm_path_entry_frame.pack(fill="x", padx=10, pady=(0, 10))
         llm_path_entry_frame.grid_columnconfigure(0, weight=1)
-        self.llm_path_entry = ctk.CTkEntry(llm_path_entry_frame, textvariable=self.llm_model_path_var, placeholder_text="Default: Selected based on .env")
+        self.llm_path_entry = ctk.CTkEntry(llm_path_entry_frame, textvariable=self.llm_model_path_var, placeholder_text="Default: Selected based on .env/model")
         self.llm_path_entry.grid(row=0, column=0, sticky="ew", padx=(0, 5))
         llm_path_browse_button = ctk.CTkButton(llm_path_entry_frame, text="Browse...", width=80, command=self.browse_model_file)
         llm_path_browse_button.grid(row=0, column=1, sticky="e")
@@ -157,7 +163,8 @@ class SettingsWindow(ctk.CTkToplevel):
              # Note: We don't save this temporary change
 
         creds_file = temp_settings.get("google_drive_credentials_file", "credentials.json")
-        token_file = temp_settings.get("google_drive_token_file", "token.pickle")
+        # Use JSON token file now
+        token_file = temp_settings.get("google_drive_token_file", "token.json") 
         folder_name = temp_settings.get("google_drive_folder_name", "Jarvis-Core History")
         history_filename = temp_settings.get("history_filename", "jarvis_chat_history.json")
 
@@ -179,16 +186,16 @@ class SettingsWindow(ctk.CTkToplevel):
         """Worker thread for Google Drive authentication."""
         try:
             success = gdrive_manager.authenticate(force_reauth=True)
+            # Use after() to safely update GUI from thread
             if success:
                 logging.info("Google Drive authentication successful in thread.")
-                # Optionally show success message - needs careful GUI update from thread
-                # self.parent.after(0, lambda: messagebox.showinfo("Success", "Google Drive authenticated successfully.", parent=self))
+                self.parent.after(0, lambda: messagebox.showinfo("Success", "Google Drive authenticated successfully.", parent=self))
             else:
                 logging.warning("Google Drive authentication failed or was cancelled in thread.")
-                # self.parent.after(0, lambda: messagebox.showwarning("Authentication Failed", "Google Drive authentication failed or was cancelled.", parent=self))
+                self.parent.after(0, lambda: messagebox.showwarning("Authentication Failed", "Google Drive authentication failed or was cancelled.", parent=self))
         except Exception as e:
             logging.exception("Error during Google Drive authentication thread.")
-            # self.parent.after(0, lambda: messagebox.showerror("Authentication Error", f"An error occurred during Google Drive authentication: {e}", parent=self))
+            self.parent.after(0, lambda: messagebox.showerror("Authentication Error", f"An error occurred during Google Drive authentication: {e}", parent=self))
 
     def save_and_close(self):
         """Saves all settings, notifies parent to restart backend, and closes."""
@@ -244,7 +251,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.destroy() # Close the settings window
 
-# --- Main Chat Window --- (Modified)
+# --- Main Chat Window --- (Modified for STT/TTS)
 class ChatWindow(ctk.CTk):
     """Main chat window for the Jarvis-Core AI Agent."""
 
@@ -252,14 +259,14 @@ class ChatWindow(ctk.CTk):
         super().__init__()
 
         self.title("Jarvis-Core")
-        self.geometry("700x550")
+        self.geometry("700x600") # Increased height slightly for mic button
 
-        # Configure grid layout (2 rows, 2 columns - added col for settings btn)
+        # Configure grid layout (2 rows, 3 columns: chat, input+send+mic, settings)
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
         # Column 1 for settings button (no weight)
 
-        # --- Settings Button --- (New)
+        # --- Settings Button --- 
         self.settings_button = ctk.CTkButton(self, text="⚙️", width=30, command=self.open_settings)
         self.settings_button.grid(row=1, column=1, padx=(0, 10), pady=(5, 10), sticky="e")
 
@@ -270,56 +277,83 @@ class ChatWindow(ctk.CTk):
         # --- Input Area Frame ---
         self.input_frame = ctk.CTkFrame(self, corner_radius=0)
         self.input_frame.grid(row=1, column=0, padx=10, pady=(5, 10), sticky="ew") # Only in column 0
-        self.input_frame.grid_columnconfigure(0, weight=1)
+        self.input_frame.grid_columnconfigure(0, weight=1) # Input entry takes most space
+        # Column 1 for Send button, Column 2 for Mic button
 
         # --- Input Field ---
-        self.input_entry = ctk.CTkEntry(self.input_frame, placeholder_text="Type your message here...", font=("Arial", 12))
+        self.input_entry = ctk.CTkEntry(self.input_frame, placeholder_text="Type or use microphone...", font=("Arial", 12))
         self.input_entry.grid(row=0, column=0, padx=(0, 5), pady=5, sticky="ew")
         self.input_entry.bind("<Return>", self.send_message_event)
 
         # --- Send Button ---
         self.send_button = ctk.CTkButton(self.input_frame, text="Send", width=70, command=self.send_message, font=("Arial", 12))
-        self.send_button.grid(row=0, column=1, padx=(5, 0), pady=5, sticky="e")
+        self.send_button.grid(row=0, column=1, padx=(5, 5), pady=5, sticky="e")
 
-        # --- Backend Orchestrator & Storage Initialization ---
+        # --- Microphone Button (New) ---
+        self.mic_button = ctk.CTkButton(self.input_frame, text="🎤", width=40, command=self.toggle_stt)
+        self.mic_button.grid(row=0, column=2, padx=(0, 0), pady=5, sticky="e")
+        self.is_stt_listening = False
+
+        # --- Backend Orchestrator, Storage, STT, TTS Initialization ---
         self.orchestrator = None
-        self.storage_manager = None # Use unified manager
+        self.storage_manager = None
+        self.stt_engine = None
+        self.tts_engine = None
         self.response_queue = queue.Queue()
-        self.init_backend_and_storage()
+        self.init_backend_and_speech()
 
-        # Start checking the queue for responses
-        self.after(100, self.check_response_queue)
+        # Start checking response queue
+        self.check_response_queue()
 
-    def init_backend_and_storage(self):
-        """Initializes storage manager and backend orchestrator."""
-        self.display_message("System", "Initializing storage...")
-        self.storage_manager = get_storage_manager() # Initialize based on settings
-        self.load_and_display_history()
+        # Bind closing event
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        self.display_message("System", "Initializing backend AI... Please wait.")
-        threading.Thread(target=self._init_orchestrator_thread, daemon=True).start()
-
-    def reinitialize_storage(self):
-        """Re-initializes the storage manager after settings change."""
-        self.display_message("System", "Re-initializing storage based on new settings...")
+    def init_backend_and_speech(self):
+        """Initializes backend orchestrator, storage, STT, and TTS."""
+        self.display_message("System", "Initializing backend systems...")
+        # Initialize Storage first
         try:
-            self.storage_manager = initialize_storage_manager(force_reinit=True)
-            # Attempt authentication immediately if Google Drive is selected
-            if isinstance(self.storage_manager, GoogleDriveStorageManager):
-                 self.display_message("System", "Attempting Google Drive connection...")
-                 auth_success = self.storage_manager.authenticate()
-                 if auth_success:
-                     self.display_message("System", "Google Drive connected successfully.")
-                 else:
-                     self.display_message("System", "Google Drive connection failed. Please check authentication via Settings.")
-            else:
-                 self.display_message("System", "Using local storage.")
-            # Reload history from the new source
-            self.clear_chat_display()
+            self.storage_manager = initialize_storage_manager()
             self.load_and_display_history()
         except Exception as e:
-            logging.exception("Error re-initializing storage manager.")
-            self.display_message("System", f"Error switching storage: {e}")
+            logging.exception("Error initializing storage manager.")
+            self.display_message("System", f"Error initializing storage: {e}")
+
+        # Initialize Orchestrator in a thread
+        threading.Thread(target=self._init_orchestrator_thread, daemon=True).start()
+
+        # Initialize STT
+        try:
+            self.stt_engine = SpeechToText()
+            self.mic_button.configure(state="normal") # Enable mic button if STT loads
+            logging.info("STT Engine Initialized.")
+        except FileNotFoundError as e:
+            logging.error(f"STT Init Error: {e}")
+            self.display_message("System", f"STT Error: Model not found. Please download models (see README). Mic disabled.")
+            self.mic_button.configure(state="disabled")
+        except Exception as e:
+            logging.exception("Error initializing STT engine.")
+            self.display_message("System", f"Error initializing STT: {e}. Mic disabled.")
+            self.mic_button.configure(state="disabled")
+
+        # Initialize TTS
+        try:
+            self.tts_engine = TextToSpeech()
+            logging.info("TTS Engine Initialized.")
+        except FileNotFoundError as e:
+            logging.error(f"TTS Init Error: {e}")
+            self.display_message("System", f"TTS Error: Model not found. Please download models (see README). Speech output disabled.")
+        except Exception as e:
+            logging.exception("Error initializing TTS engine.")
+            self.display_message("System", f"Error initializing TTS: {e}. Speech output disabled.")
+
+    def reinitialize_backend(self):
+        """Re-initializes orchestrator and storage after settings change."""
+        self.display_message("System", "Restarting backend due to settings change...")
+        # Stop existing orchestrator/agent if running (add proper shutdown if needed)
+        self.orchestrator = None # For now, just reset
+        self.clear_chat_display()
+        self.init_backend_and_speech() # Re-run full initialization
 
     def load_and_display_history(self):
         """Loads history from the current storage manager and displays it."""
@@ -329,14 +363,14 @@ class ChatWindow(ctk.CTk):
         try:
             history = self.storage_manager.load_history()
             if history:
-                self.display_message("System", f"Loaded {len(history)} messages from history.")
+                self.display_message("System", f"Loaded {len(history)} messages from history.", speak=False) # Don't speak history
                 for entry in history:
-                    self.display_message(entry.get("sender", "?"), entry.get("message", ""))
+                    self.display_message(entry.get("sender", "?"), entry.get("message", ""), speak=False)
             else:
-                 self.display_message("System", "No previous conversation history found.")
+                 self.display_message("System", "No previous conversation history found.", speak=False)
         except Exception as e:
             logging.exception("Error loading/displaying history.")
-            self.display_message("System", f"Error loading history: {e}")
+            self.display_message("System", f"Error loading history: {e}", speak=False)
 
     def clear_chat_display(self):
         """Clears the chat display area."""
@@ -359,13 +393,15 @@ class ChatWindow(ctk.CTk):
             self.response_queue.put(("System", f"Critical Error: Backend AI failed: {e}"))
 
     def send_message_event(self, event):
+        """Handles sending message when Enter key is pressed."""
         self.send_message()
 
     def send_message(self):
+        """Sends the message from the input entry to the backend."""
         user_input = self.input_entry.get()
         if not user_input.strip(): return
 
-        self.display_message("You", user_input)
+        self.display_message("You", user_input, speak=False) # Don't speak user's input
         # Save message using the current storage manager
         if self.storage_manager:
             self.storage_manager.save_message("You", user_input)
@@ -375,59 +411,139 @@ class ChatWindow(ctk.CTk):
         if self.orchestrator and self.orchestrator.agent:
             self.input_entry.configure(state="disabled")
             self.send_button.configure(state="disabled")
-            self.display_message("System", "Processing...")
+            self.mic_button.configure(state="disabled") # Disable mic during processing
+            self.display_message("System", "Processing...", speak=False)
             threading.Thread(target=self._get_backend_response_thread, args=(user_input,), daemon=True).start()
         else:
-            self.display_message("System", "Error: Backend AI is not available.")
+            self.display_message("System", "Error: Backend AI is not available.", speak=True)
             # Save a placeholder response if backend fails
             if self.storage_manager:
                 self.storage_manager.save_message("System", "Error: Backend AI is not available.")
 
     def _get_backend_response_thread(self, user_input: str):
+        """Worker thread to get response from the orchestrator."""
         response = "Error: Processing failed."
+        sender = "System"
         try:
             response = self.orchestrator.route_command(user_input)
-            self.response_queue.put(("Jarvis", response))
+            sender = "Jarvis"
+            self.response_queue.put((sender, response))
         except Exception as e:
             logging.exception("Error getting response from orchestrator thread.")
             response = f"Error processing request: {e}"
-            self.response_queue.put(("System", response))
+            sender = "System"
+            self.response_queue.put((sender, response))
         finally:
             # Save Jarvis/System response
             if self.storage_manager:
-                sender = "Jarvis" if "Error" not in response else "System"
                 self.storage_manager.save_message(sender, response)
 
     def check_response_queue(self):
+        """Checks the queue for messages from backend threads and displays them."""
         try:
             while True:
                 sender, message = self.response_queue.get_nowait()
                 # Re-enable input after response or error
                 self.input_entry.configure(state="normal")
                 self.send_button.configure(state="normal")
+                # Re-enable mic button only if STT engine is available
+                if self.stt_engine:
+                    self.mic_button.configure(state="normal")
+                
                 # Remove "Processing..." message - simplistic approach:
-                # If the last message was "Processing...", remove it before adding new one.
-                # This requires reading the last line, which is complex in Text widget.
-                # For now, we just display the new message.
-                self.display_message(sender, message)
+                # We just display the new message.
+                self.display_message(sender, message, speak=(sender == "Jarvis")) # Speak Jarvis's responses
         except queue.Empty:
             pass
         finally:
+            # Schedule the next check
             self.after(100, self.check_response_queue)
 
-    def display_message(self, sender: str, message: str):
+    def display_message(self, sender: str, message: str, speak: bool = False):
+        """Displays a message in the chat window and optionally speaks it."""
         try:
             self.chat_display.configure(state="normal")
             formatted_message = f"{sender}: {message}\n\n"
             self.chat_display.insert("end", formatted_message)
             self.chat_display.configure(state="disabled")
             self.chat_display.see("end")
+
+            # Speak the message if requested and TTS is available
+            if speak and self.tts_engine:
+                # Run TTS in a separate thread to avoid blocking GUI
+                threading.Thread(target=self._tts_speak_thread, args=(message,), daemon=True).start()
+
         except Exception as e:
             logging.error(f"Error displaying message: {e}")
+
+    def _tts_speak_thread(self, text_to_speak):
+        """Worker thread for TTS synthesis and playback."""
+        try:
+            logging.info("Starting TTS playback in thread...")
+            self.tts_engine.speak(text_to_speak)
+            logging.info("TTS playback finished in thread.")
+        except Exception as e:
+            logging.error(f"Error during TTS playback thread: {e}", exc_info=True)
+
+    def toggle_stt(self):
+        """Toggles the STT listening state."""
+        if not self.stt_engine:
+            messagebox.showwarning("STT Error", "Speech recognition engine not available.", parent=self)
+            return
+
+        if self.is_stt_listening:
+            # Stop listening
+            try:
+                self.stt_engine.stop()
+                self.is_stt_listening = False
+                self.mic_button.configure(text="🎤", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"]) # Reset color
+                logging.info("STT stopped by user.")
+            except Exception as e:
+                logging.error(f"Error stopping STT: {e}", exc_info=True)
+                messagebox.showerror("STT Error", f"Failed to stop listening: {e}", parent=self)
+        else:
+            # Start listening
+            try:
+                self.stt_engine.start(self.handle_stt_result)
+                self.is_stt_listening = True
+                self.mic_button.configure(text="⏹️", fg_color="red") # Indicate listening
+                logging.info("STT started by user.")
+            except Exception as e:
+                logging.error(f"Error starting STT: {e}", exc_info=True)
+                messagebox.showerror("STT Error", f"Failed to start listening: {e}", parent=self)
+                self.is_stt_listening = False # Ensure state is correct
+
+    def handle_stt_result(self, recognized_text):
+        """Callback function for the STT engine. Updates the input field."""
+        # Use after() to safely update GUI from STT thread
+        self.after(0, self._update_input_entry, recognized_text)
+
+    def _update_input_entry(self, text):
+        """Safely updates the input entry from the main GUI thread."""
+        current_text = self.input_entry.get()
+        if current_text:
+            self.input_entry.insert("end", " " + text) # Append with space
+        else:
+            self.input_entry.insert(0, text) # Insert if empty
+        # Optionally stop listening after one utterance? For now, keep listening until stopped.
+        # self.toggle_stt() # Uncomment to stop after first result
 
     def open_settings(self):
         """Opens the settings window."""
         settings_win = SettingsWindow(self)
+
+    def on_closing(self):
+        """Handles window closing event."""
+        logging.info("Close button pressed. Shutting down...")
+        # Stop STT if running
+        if self.stt_engine and self.is_stt_listening:
+            try:
+                self.stt_engine.stop()
+                logging.info("STT stopped during shutdown.")
+            except Exception as e:
+                logging.error(f"Error stopping STT during shutdown: {e}")
+        # Add any other cleanup needed (e.g., wait for TTS thread?)
+        self.destroy()
 
 # --- Main Execution ---
 if __name__ == "__main__":

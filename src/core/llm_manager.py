@@ -7,6 +7,7 @@ from huggingface_hub import hf_hub_download
 from huggingface_hub.errors import HfHubHTTPError
 import sys
 from tqdm import tqdm # For progress bar
+import psutil # Import psutil for CPU core count
 
 # Import load_settings from storage_manager
 from .storage_manager import load_settings
@@ -14,7 +15,15 @@ from .storage_manager import load_settings
 # Load environment variables from .env file (still useful for defaults like USE_GPU)
 load_dotenv()
 
-# Configure logginglogging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Define default model details
+DEFAULT_MODEL_REPO = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
+DEFAULT_MODEL_FILENAME_Q4KM = "Meta-Llama-3-8B-Instruct.Q4_K_M.gguf" # Recommended default
+DEFAULT_MODEL_FILENAME_Q8 = "Meta-Llama-3-8B-Instruct.Q8_0.gguf" # High accuracy option
+DEFAULT_MODEL_DOWNLOAD_SIZE_Q4KM = "~4.37 GB" # Approximate size for Q4_K_M
+
 class LLMLoader:
     """Loads the appropriate local LLM based on environment and settings."""
 
@@ -43,8 +52,8 @@ class LLMLoader:
             # Fallback logic using self.model_dir
             high_accuracy = os.getenv("HIGH_ACCURACY_MODE") == "1"
             self.model_name = (
-                "Meta-Llama-3-8B-Instruct.Q8_0.gguf" if high_accuracy
-                else "Meta-Llama-3-8B-Instruct.Q4_0.gguf"
+                DEFAULT_MODEL_FILENAME_Q8 if high_accuracy
+                else DEFAULT_MODEL_FILENAME_Q4KM # Use Q4_K_M as default
             )
             self.model_path = self.model_dir / self.model_name # Use self.model_dir here
             logging.info(f"Using default LLM model path: {self.model_path}")
@@ -62,16 +71,17 @@ class LLMLoader:
         if not model_file_path.exists():
             logging.warning(f"Model file not found at {model_file_path}.")
 
-            # Determine if this is the default path/name configuration
+            # Determine if this is the default path/name configuration for download trigger
             settings = load_settings()
             custom_model_path_setting = settings.get("llm_model_path")
-            is_default_config = (not custom_model_path_setting or not Path(custom_model_path_setting).is_file()) and self.model_name == "Meta-Llama-3-8B-Instruct.Q4_0.gguf"
+            # Check if the *current* model_name matches the Q4_K_M default
+            is_default_download_config = (not custom_model_path_setting or not Path(custom_model_path_setting).is_file()) and self.model_name == DEFAULT_MODEL_FILENAME_Q4KM
 
-            if is_default_config:
-                # Attempt to download the default model
+            if is_default_download_config:
+                # Attempt to download the default Q4_K_M model
                 logging.info(f"Attempting to download default model {self.model_name} to {model_dir_used}...")
-                print(f"\nINFO: Default model {self.model_name} not found. Downloading from Hugging Face (approx. 4.66 GB)... This may take a while.")
-                repo_id = "QuantFactory/Meta-Llama-3-8B-Instruct-GGUF"
+                print(f"\nINFO: Default model {self.model_name} not found. Downloading from Hugging Face ({DEFAULT_MODEL_DOWNLOAD_SIZE_Q4KM})... This may take a while.")
+                repo_id = DEFAULT_MODEL_REPO
                 filename = self.model_name
                 try:
                     # Ensure the target directory exists (redundant if __init__ worked, but safe)
@@ -122,12 +132,29 @@ class LLMLoader:
         # Proceed with loading the model if it exists (either initially or after download)
         try:
             logging.info(f"Attempting to load model: {model_file_path}")
+            
+            # --- Performance Optimizations --- 
+            # Get physical core count for thread pinning
+            try:
+                physical_cores = psutil.cpu_count(logical=False)
+                if physical_cores is None or physical_cores <= 0:
+                    physical_cores = max(1, os.cpu_count() // 2) # Estimate if psutil fails or returns invalid
+                    logging.warning(f"psutil failed to get physical cores or returned invalid value, estimating {physical_cores}")
+                else:
+                    logging.info(f"Detected {physical_cores} physical CPU cores for thread pinning.")
+            except Exception as e:
+                logging.warning(f"Error getting physical core count: {e}. Using default thread count.")
+                physical_cores = int(os.getenv("N_THREADS", 8)) # Fallback to env or default
+
             llm = GPT4All(
                 model=str(model_file_path), # Ensure it's a string for GPT4All
                 device="gpu" if self.use_gpu else "cpu",
-                n_threads=int(os.getenv("N_THREADS", 8)),
+                n_threads=physical_cores, # Use physical core count
+                use_mmap=True, # Enable memory-mapped loading
                 verbose=True
             )
+            # --- End Performance Optimizations ---
+            
             logging.info("LLM loaded successfully.")
             return llm
         except Exception as e:
