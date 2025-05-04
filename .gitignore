@@ -1,0 +1,34 @@
+# Ignore LLM model files
+*.gguf
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+
+# Ignore virtual environment
+venv/
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore IDE/editor files
+.vscode/
+.idea/
+
+# Ignore build artifacts
+build/
+dist/
+*.spec
+
+# Ignore sensitive files
+.env
+token.pickle
+credentials.json
+
+# Ignore LFS cache (if applicable, though usually global)
+.git/lfs/
+
+# Ignore pytest cache
+.pytest_cache/
+
