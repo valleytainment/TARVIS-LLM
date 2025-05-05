@@ -39,3 +39,9 @@ google-auth-oauthlib
 huggingface_hub
 tqdm
 
+
+sentence-transformers
+langchainhub
+
+langchain-openai
+langchain-deepseek

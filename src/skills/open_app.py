@@ -5,6 +5,7 @@ import yaml
 import os
 import platform
 import logging
+import shutil # Added for finding executables in PATH
 from langchain.tools import tool # Import the decorator
 
 # Configure logging
@@ -20,7 +21,7 @@ def load_app_paths():
     try:
         # Ensure config directory exists
         os.makedirs(os.path.dirname(config_path), exist_ok=True)
-        # Create default config if it doesn't exist
+        # Create default config if it doesn\\\\'t exist
         if not os.path.exists(config_path):
             logging.warning(f"Config file {config_path} not found. Creating default.")
             default_config = {
@@ -29,7 +30,7 @@ def load_app_paths():
                         "Windows": {
                             "notepad": "notepad.exe",
                             "calculator": "calc.exe",
-                            "firefox": "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+                            "firefox": "C:\\\\Program Files\\\\Mozilla Firefox\\\\firefox.exe"
                         },
                         "Linux": {
                             "gedit": "/usr/bin/gedit",
@@ -44,10 +45,10 @@ def load_app_paths():
                     }
                 }
             }
-            with open(config_path, 'w') as f:
+            with open(config_path, \'w\') as f:
                 yaml.dump(default_config, f, default_flow_style=False)
 
-        with open(config_path, 'r') as f:
+        with open(config_path, \'r\') as f:
             config = yaml.safe_load(f)
             # Get paths for the current OS
             os_name = platform.system()
@@ -64,70 +65,155 @@ def load_app_paths():
 
 @tool
 def open_application(app_name: str) -> str:
-    """Opens or launches a specified application on the computer (e.g., Firefox, Notepad, Calculator, TextEdit). Input should be the name of the application as defined in the configuration or available in the system's PATH."""
-    app_name_lower = app_name.lower()
-    logging.info(f"Attempting to launch application: {app_name}")
+    """Opens or launches a specified application based on pre-configured paths or system PATH.
+    
+    SECURITY WARNING: This tool executes external applications. Ensure the configuration 
+    (app_paths.yaml) is secure and the underlying system PATH is trusted. Avoid using 
+    this tool with untrusted application names if possible.
+    
+    Args:
+        app_name: The name of the application (e.g., \'Firefox\
+', \'Notepad\
+', \'Calculator\
+', \'TextEdit\
+'). 
+                  Matches against keys in app_paths.yaml (case-insensitive) or attempts to find in PATH.
+
+    Returns:
+        A status message indicating success or failure.
+    """
+    # Basic input validation
+    if not app_name or not isinstance(app_name, str):
+        logging.error("Invalid app_name provided to open_application.")
+        return "❌ Error: Invalid or empty application name provided."
+        
+    # Sanitize app_name slightly? For now, rely on config lookup and shutil.which
+    # Avoid complex sanitization that might break valid names.
+    app_name_cleaned = app_name.strip() # Remove leading/trailing whitespace
+    if not app_name_cleaned:
+        return "❌ Error: Empty application name provided after stripping whitespace."
+        
+    app_name_lower = app_name_cleaned.lower()
+    logging.info(f"Attempting to launch application: {app_name_cleaned}")
     app_paths = load_app_paths()
     os_name = platform.system()
 
     if not app_paths:
-        # Even if config load fails, still try PATH fallback
         logging.warning(f"Application paths configuration failed to load or is empty for OS: {os_name}. Will attempt PATH fallback.")
 
-    # Find the application path (case-insensitive key matching)
-    app_path = None
+    # 1. Try launching using configured path (case-insensitive key matching)
+    app_path_from_config = None
     for key, path in app_paths.items():
         if key.lower() == app_name_lower:
-            app_path = path
+            app_path_from_config = path
             break
 
-    if app_path:
+    if app_path_from_config:
         # Expand environment variables like %USERNAME% or $HOME
-        expanded_path = os.path.expandvars(app_path)
-        try:
-            logging.info(f"Launching \'{app_name}\' using configured path: {expanded_path}")
-            if os_name == "Windows":
-                # Use start /B on Windows to avoid blocking and console windows
-                subprocess.Popen(f'start /B "" "{expanded_path}"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            elif os_name == "Darwin": # macOS
-                 # Use 'open' command on macOS
-                 subprocess.Popen(["open", expanded_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else: # Linux and other Unix-like
-                # Simple Popen should work, detaches automatically
-                subprocess.Popen([expanded_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return f"✅ Launched {app_name} using configured path."
-        except FileNotFoundError:
-            error_msg = f"❌ Error: Configured application executable not found at path: {expanded_path}"
+        expanded_path = os.path.expandvars(app_path_from_config)
+        # Ensure the path is absolute for security, especially before executing
+        if not os.path.isabs(expanded_path):
+             logging.warning(f"Configured path \"{expanded_path}\" for \"{app_name_cleaned}\" is not absolute. Attempting to resolve via PATH.")
+             # Try to find the non-absolute path in PATH
+             resolved_path = shutil.which(expanded_path)
+             if not resolved_path:
+                 error_msg = f"❌ Error: Configured relative path \"{expanded_path}\" for \"{app_name_cleaned}\" not found in PATH."
+                 logging.error(error_msg)
+                 # Fall through to general PATH fallback below
+             else:
+                 expanded_path = resolved_path # Use the absolute path found
+                 logging.info(f"Resolved relative path to: {expanded_path}")
+                 
+        # Check if the resolved path is actually a file
+        if not os.path.isfile(expanded_path):
+            error_msg = f"❌ Error: Configured path \"{expanded_path}\" for \"{app_name_cleaned}\" does not exist or is not a file."
             logging.error(error_msg)
-            # Fall through to PATH check
-        except PermissionError:
-            error_msg = f"❌ Error: Permission denied when trying to execute configured path: {expanded_path}"
-            logging.error(error_msg)
-            return error_msg # Don't fallback if permission denied on specific path
-        except Exception as e:
-            error_msg = f"❌ Error launching {app_name} using configured path {expanded_path}: {e}"
-            logging.error(error_msg, exc_info=True)
-            # Fall through to PATH check
+            # Fall through to general PATH fallback below
+        else:
+            try:
+                logging.info(f"Launching \"{app_name_cleaned}\" using configured absolute path: {expanded_path}")
+                # Use safer subprocess calls without shell=True
+                if os_name == "Windows":
+                    # Use DETACHED_PROCESS and CREATE_NO_WINDOW for GUI apps on Windows
+                    subprocess.Popen([expanded_path], 
+                                     stdout=subprocess.DEVNULL, 
+                                     stderr=subprocess.DEVNULL, 
+                                     creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+                elif os_name == "Darwin": # macOS
+                     # Use \'open\' command on macOS - handles .app bundles correctly
+                     subprocess.Popen(["open", expanded_path], 
+                                      stdout=subprocess.DEVNULL, 
+                                      stderr=subprocess.DEVNULL)
+                else: # Linux and other Unix-like
+                    # Simple Popen should work, detaches automatically
+                    subprocess.Popen([expanded_path], 
+                                     stdout=subprocess.DEVNULL, 
+                                     stderr=subprocess.DEVNULL)
+                return f"✅ Launched {app_name_cleaned} using configured path."
+            except PermissionError:
+                error_msg = f"❌ Error: Permission denied when trying to execute configured path: {expanded_path}"
+                logging.error(error_msg)
+                return error_msg # Don\\'t fallback if permission denied on specific path
+            except Exception as e:
+                error_msg = f"❌ Error launching {app_name_cleaned} using configured path {expanded_path}: {e}"
+                logging.error(error_msg, exc_info=True)
+                # Fall through to PATH check if launch fails for other reasons
 
-    # Fallback: Try launching directly (assumes app is in PATH)
-    logging.warning(f"Application \'{app_name}\' not found in configuration or launch failed. Attempting PATH fallback.")
+    # 2. Fallback: Try finding the application in the system PATH
+    logging.warning(f"Application \"{app_name_cleaned}\" not found in configuration or launch failed. Attempting PATH fallback.")
+    found_path_in_path = shutil.which(app_name_lower) # Use lower case for PATH lookup consistency
+    
+    if not found_path_in_path:
+        # Specific check for macOS .app bundles using `open -a` logic
+        if os_name == "Darwin":
+            try:
+                logging.info(f"Attempting macOS \'open -a\" fallback for: {app_name_cleaned}")
+                # Use check=True to raise CalledProcessError if \'open -a\' fails
+                subprocess.run(["open", "-a", app_name_cleaned], 
+                                 check=True, 
+                                 stdout=subprocess.DEVNULL, 
+                                 stderr=subprocess.DEVNULL)
+                logging.info(f"Launched \"{app_name_cleaned}\" via macOS \'open -a\" fallback.")
+                return f"✅ Launched \'{app_name_cleaned}\' (via macOS app search)."
+            except FileNotFoundError: # If \'open\' command itself is missing (unlikely)
+                 error_msg = f"❌ Error: \'open\' command not found on macOS."
+                 logging.error(error_msg)
+                 return error_msg
+            except subprocess.CalledProcessError:
+                 error_msg = f"❌ Error: Application \"{app_name_cleaned}\" not found via config, PATH, or macOS app search."
+                 logging.warning(error_msg) # Log as warning as it\'s a common failure
+                 return error_msg
+            except Exception as e:
+                 error_msg = f"❌ Unexpected error during macOS \'open -a\" fallback for \"{app_name_cleaned}\": {e}"
+                 logging.error(error_msg, exc_info=True)
+                 return error_msg
+        else:
+            # If not macOS and not found by shutil.which
+            error_msg = f"❌ Error: Application \"{app_name_cleaned}\" not found in config or system PATH."
+            logging.warning(error_msg) # Log as warning
+            return error_msg
+
+    # If found via shutil.which
     try:
+        logging.info(f"Launching \"{app_name_cleaned}\" via PATH fallback using: {found_path_in_path}")
         if os_name == "Windows":
-            subprocess.Popen(f'start /B "" "{app_name_lower}"', shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif os_name == "Darwin":
-             # Use 'open -a' to search for app by name/bundle identifier
-             subprocess.Popen(["open", "-a", app_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        else: # Linux
-            # Rely on which/PATH lookup by Popen
-            subprocess.Popen([app_name_lower], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        logging.info(f"Launched \'{app_name}\' via PATH fallback.")
-        return f"✅ Launched 	'{app_name}	' (assumed in PATH)."
-    except Exception as e:
-        error_msg = f"❌ Error launching 	'{app_name}	': Not found in config and failed PATH fallback. Error: {e}"
+            subprocess.Popen([found_path_in_path], 
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL, 
+                             creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW)
+        # No need for specific macOS \'open\' here as shutil.which found the executable path
+        else: # Linux, macOS (if executable found directly), etc.
+            subprocess.Popen([found_path_in_path], 
+                             stdout=subprocess.DEVNULL, 
+                             stderr=subprocess.DEVNULL)
+        return f"✅ Launched \'{app_name_cleaned}\' (found in PATH)."
+    except PermissionError:
+        error_msg = f"❌ Error: Permission denied when trying to execute from PATH: {found_path_in_path}"
         logging.error(error_msg)
-        # Do not include exc_info=True for simple FileNotFoundError during fallback
-        if not isinstance(e, FileNotFoundError):
-             logging.error("Exception details for PATH fallback failure:", exc_info=True)
+        return error_msg
+    except Exception as e:
+        error_msg = f"❌ Error launching \'{app_name_cleaned}\' via PATH fallback ({found_path_in_path}): {e}"
+        logging.error(error_msg, exc_info=True)
         return error_msg
 
 # Example usage (for testing purposes)

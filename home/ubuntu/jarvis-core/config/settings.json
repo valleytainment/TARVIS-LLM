@@ -1,0 +1,11 @@
+{
+  "storage_mode": "local",
+  "local_storage_path": "/home/ubuntu/jarvis_test_history", 
+  "google_drive_credentials_file": "credentials.json",
+  "google_drive_token_file": "token.pickle",
+  "google_drive_folder_name": "Jarvis-Core History",
+  "history_filename": "jarvis_chat_history.json",
+  "llm_model_path": null, 
+  "system_prompt_path": null 
+}
+

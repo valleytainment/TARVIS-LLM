@@ -1,64 +1,118 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import json
 import os
 import logging
 from pathlib import Path
 from datetime import datetime
-# Removed pickle import
 import io
+import threading # Added for GDrive auth thread
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-# Import Credentials for JSON handling
-from google.oauth2.credentials import Credentials 
+from google.oauth2.credentials import Credentials
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 from dotenv import load_dotenv
+
+# Import SecureStorage (assuming it's in src/utils/security.py)
+# Need to handle potential import errors if structure changes
+try:
+    from src.utils.security import SecureStorage
+except ImportError:
+    logging.error("Could not import SecureStorage. API key functionality will be limited.")
+    SecureStorage = None # Define as None if import fails
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - Storage - %(message)s")
 
 # --- Configuration Loading ---
 def load_settings():
-    """Loads settings from config/settings.json."""
+    """Loads settings from config/settings.json, merging with defaults."""
     settings_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
+    
+    # Define the default structure including API providers
     default_settings = {
         "storage_mode": "local",
-        "local_storage_path": None, # Default to null, meaning use default path
+        "local_storage_path": None,
         "google_drive_credentials_file": "credentials.json",
-        # Updated default token filename
-        "google_drive_token_file": "token.json", 
+        "google_drive_token_file": "token.json",
         "google_drive_folder_name": "Jarvis-Core History",
         "history_filename": "jarvis_chat_history.json",
-        "llm_model_path": None, # Default to null, meaning use model selection logic
-        "system_prompt_path": None # Default to null, meaning use default prompt path
+        "llm_model_path": None,
+        "system_prompt_path": None,
+        "active_llm_provider": "local", # Default to local LLM
+        "api_providers": {
+            "openai": {
+                "enabled": False,
+                "model": "gpt-4", # Example default model
+                "endpoint": None,
+                # API key is NOT stored here, managed by SecureStorage
+            },
+            "deepseek": {
+                "enabled": False,
+                "model": "deepseek-chat", # Example default model
+                "endpoint": None,
+                # API key is NOT stored here
+            },
+            # Add other providers here as needed
+        }
     }
+    
     if not settings_path.exists():
         logging.warning(f"Settings file not found at {settings_path}. Using default settings.")
-        # Ensure config directory exists before potentially saving defaults later
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         return default_settings
+        
     try:
         with open(settings_path, "r", encoding="utf-8") as f:
             loaded_settings = json.load(f)
-            # Merge with defaults to ensure all keys are present
-            default_settings.update(loaded_settings)
+            
+            # Deep merge loaded settings onto defaults to preserve structure
+            # and add new default fields if missing from loaded file.
+            def merge_dicts(base, update):
+                for key, value in update.items():
+                    if isinstance(value, dict) and key in base and isinstance(base[key], dict):
+                        merge_dicts(base[key], value)
+                    else:
+                        base[key] = value
+                return base
+
+            merged_settings = merge_dicts(default_settings.copy(), loaded_settings)
+            
             # Ensure token filename default is updated if loaded from old settings
-            if default_settings.get("google_drive_token_file") == "token.pickle":
+            if merged_settings.get("google_drive_token_file") == "token.pickle":
                 logging.warning("Updating default token filename from token.pickle to token.json in loaded settings.")
-                default_settings["google_drive_token_file"] = "token.json"
-            return default_settings
+                merged_settings["google_drive_token_file"] = "token.json"
+                
+            return merged_settings
+            
     except (json.JSONDecodeError, IOError) as e:
         logging.error(f"Error loading settings from {settings_path}: {e}. Using default settings.")
-        return default_settings
+        return default_settings.copy() # Return a copy of defaults on error
 
 def save_settings(settings: dict):
-    """Saves settings to config/settings.json."""
+    """Saves settings to config/settings.json, excluding sensitive info like API keys."""
     settings_path = Path(__file__).resolve().parent.parent.parent / "config" / "settings.json"
+    
+    # Create a copy to avoid modifying the original dict in memory
+    settings_to_save = settings.copy()
+    
+    # Explicitly remove API keys before saving to JSON
+    # (Although they shouldn't be there if loaded/managed correctly)
+    if "api_providers" in settings_to_save:
+        for provider in settings_to_save["api_providers"]:
+            if "api_key" in settings_to_save["api_providers"][provider]:
+                # This field shouldn't exist here, but remove just in case
+                del settings_to_save["api_providers"][provider]["api_key"]
+            # We also don't save the 'api_key_stored' status to the file
+            if "api_key_stored" in settings_to_save["api_providers"][provider]:
+                 del settings_to_save["api_providers"][provider]["api_key_stored"]
+
     try:
-        # Ensure config directory exists
         settings_path.parent.mkdir(parents=True, exist_ok=True)
         with open(settings_path, "w", encoding="utf-8") as f:
-            json.dump(settings, f, indent=4, ensure_ascii=False)
-        logging.info(f"Saved settings to {settings_path}")
+            json.dump(settings_to_save, f, indent=4, ensure_ascii=False)
+        logging.info(f"Saved non-sensitive settings to {settings_path}")
     except IOError as e:
         logging.error(f"Error saving settings to {settings_path}: {e}")
 
@@ -67,16 +121,8 @@ class LocalStorageManager:
     """Manages saving and loading conversation history to a local JSON file."""
 
     def __init__(self, filename="jarvis_chat_history.json", storage_path=None):
-        """Initializes the LocalStorageManager.
-
-        Args:
-            filename (str): The name of the history file.
-            storage_path (str | Path | None): The custom directory path to store history.
-                                              If None, uses default ~/.jarvis-core/history.
-        """
         if storage_path:
             try:
-                # Attempt to resolve the provided path
                 custom_path = Path(storage_path).resolve()
                 self.history_dir = custom_path
                 logging.info(f"Using custom local storage path: {self.history_dir}")
@@ -84,7 +130,6 @@ class LocalStorageManager:
                 logging.error(f"Invalid custom storage path \"{storage_path}\": {e}. Falling back to default.")
                 self.history_dir = Path.home() / ".jarvis-core" / "history"
         else:
-            # Default path
             self.history_dir = Path.home() / ".jarvis-core" / "history"
             logging.info("Using default local storage path.")
 
@@ -94,11 +139,9 @@ class LocalStorageManager:
             logging.info(f"LocalStorageManager initialized. History file path: {self.filepath}")
         except Exception as e:
             logging.error(f"Failed to create history directory or set filepath {self.history_dir / filename}: {e}", exc_info=True)
-            # Attempt to set filepath even if mkdir failed, maybe permissions issue later
             self.filepath = self.history_dir / filename
 
     def save_message(self, sender: str, message: str):
-        """Appends a message entry to the local history file."""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "sender": sender,
@@ -115,12 +158,14 @@ class LocalStorageManager:
             logging.error(f"Unexpected error saving message: {e}", exc_info=True)
 
     def load_history(self) -> list[dict]:
-        """Loads the entire conversation history from the local file."""
         logging.info(f"Loading history from {self.filepath}")
         return self._load_raw_history()
 
+    def load_conversation(self) -> list[dict]:
+        """Loads the full conversation history. Alias for load_history."""
+        return self.load_history()
+
     def _load_raw_history(self) -> list[dict]:
-        """Helper function to load raw history list from JSON file."""
         if not self.filepath.exists():
             logging.warning(f"History file {self.filepath} not found. Returning empty history.")
             return []
@@ -139,25 +184,19 @@ class LocalStorageManager:
             return []
 
     def authenticate(self):
-        """Placeholder for compatibility with the unified interface."""
         logging.info("Local storage does not require authentication.")
-        return True # Always considered authenticated
+        return True
 
 # --- Google Drive Storage Manager ---
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 class GoogleDriveStorageManager:
-    """Manages saving and loading conversation history to Google Drive."""
-
-    # Updated default token filename
     def __init__(self, credentials_file="credentials.json", token_file="token.json", filename="jarvis_chat_history.json", folder_name="Jarvis-Core History"):
-        # Ensure .jarvis-core directory exists
         self.dot_jarvis_dir = Path.home() / ".jarvis-core"
         self.dot_jarvis_dir.mkdir(parents=True, exist_ok=True)
         
         self.token_path = self.dot_jarvis_dir / token_file
         self.credentials_path_str = os.getenv("GOOGLE_DRIVE_CREDENTIALS_FILE", credentials_file)
-        # Resolve credentials path relative to .jarvis-core if not absolute
         self.credentials_path = Path(self.credentials_path_str)
         if not self.credentials_path.is_absolute():
             self.credentials_path = (self.dot_jarvis_dir / self.credentials_path).resolve()
@@ -169,14 +208,11 @@ class GoogleDriveStorageManager:
         self.service = None
         self.file_id = None
         logging.info(f"Initializing GoogleDriveStorageManager. Credentials: {self.credentials_path}, Token: {self.token_path}")
-        # Authentication is now triggered explicitly via authenticate()
 
     def authenticate(self, force_reauth=False) -> bool:
-        """Authenticates the user with Google Drive API using OAuth 2.0."""
         creds = None
         if not force_reauth and self.token_path.exists():
             try:
-                # Load token from JSON
                 with open(self.token_path, "r", encoding="utf-8") as token:
                     creds_info = json.load(token)
                     creds = Credentials.from_authorized_user_info(creds_info, SCOPES)
@@ -216,9 +252,7 @@ class GoogleDriveStorageManager:
                     return False
             if creds:
                 try:
-                    # Save token as JSON
                     with open(self.token_path, "w", encoding="utf-8") as token:
-                        # Use Credentials.to_json() which returns a string, then parse and dump
                         token_data = json.loads(creds.to_json())
                         json.dump(token_data, token, indent=4)
                     logging.info(f"Saved new Google Drive token to {self.token_path}")
@@ -243,11 +277,10 @@ class GoogleDriveStorageManager:
             return False
 
     def _find_or_create_folder(self):
-        """Finds the specified folder or creates it if it doesn't exist. Returns folder ID."""
         if not self.service:
             return None
         try:
-            query = f"mimeType='application/vnd.google-apps.folder' and name='{self.folder_name}' and trashed=false"
+            query = f"mimeType=\'application/vnd.google-apps.folder\' and name=\'{self.folder_name}\' and trashed=false"
             response = self.service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
             folders = response.get("files", [])
 
@@ -270,7 +303,6 @@ class GoogleDriveStorageManager:
             return None
 
     def _ensure_file_exists(self):
-        """Finds the history file ID within the folder, creating the file if necessary."""
         if not self.service:
             return
         folder_id = self._find_or_create_folder()
@@ -279,7 +311,7 @@ class GoogleDriveStorageManager:
             return
 
         try:
-            query = f"name='{self.filename}' and '{folder_id}' in parents and trashed=false"
+            query = f"name=\'{self.filename}\' and \'{folder_id}\' in parents and trashed=false"
             response = self.service.files().list(q=query, spaces="drive", fields="files(id, name)").execute()
             files = response.get("files", [])
 
@@ -303,7 +335,6 @@ class GoogleDriveStorageManager:
             self.file_id = None
 
     def save_message(self, sender: str, message: str):
-        """Appends a message entry to the history file on Google Drive."""
         if not self.service or not self.file_id:
             logging.error("Google Drive service not available or file ID not set. Cannot save message.")
             return
@@ -322,7 +353,6 @@ class GoogleDriveStorageManager:
             logging.error(f"Error saving message to Google Drive: {e}", exc_info=True)
 
     def load_history(self) -> list[dict]:
-        """Loads the entire conversation history from the file on Google Drive."""
         logging.info(f"Loading history from Google Drive file ID: {self.file_id}")
         if not self.service or not self.file_id:
             logging.error("Google Drive service not available or file ID not set. Cannot load history.")
@@ -330,7 +360,6 @@ class GoogleDriveStorageManager:
         return self._download_history()
 
     def _download_history(self) -> list[dict]:
-        """Helper function to download and parse history from Google Drive."""
         try:
             request = self.service.files().get_media(fileId=self.file_id)
             fh = io.BytesIO()
@@ -350,19 +379,21 @@ class GoogleDriveStorageManager:
 
 # --- Unified Storage Factory ---
 
-# Global instance to hold the current storage manager
 _current_storage_manager = None
 
 def get_storage_manager():
-    """Factory function to get the currently configured storage manager instance."""
     global _current_storage_manager
     if _current_storage_manager is None:
-        initialize_storage_manager() # Ensure initialization if accessed directly
+        initialize_storage_manager()
     return _current_storage_manager
 
-def initialize_storage_manager():
+def initialize_storage_manager(force_reinit=False):
     """Initializes or re-initializes the storage manager based on current settings."""
     global _current_storage_manager
+    # Force re-initialization if requested
+    if _current_storage_manager is not None and not force_reinit:
+        return _current_storage_manager
+        
     settings = load_settings()
     mode = settings.get("storage_mode", "local")
     history_filename = settings.get("history_filename", "jarvis_chat_history.json")
@@ -371,7 +402,7 @@ def initialize_storage_manager():
 
     if mode == "google_drive":
         creds_file = settings.get("google_drive_credentials_file", "credentials.json")
-        token_file = settings.get("google_drive_token_file", "token.json") # Use updated default
+        token_file = settings.get("google_drive_token_file", "token.json")
         folder_name = settings.get("google_drive_folder_name", "Jarvis-Core History")
         _current_storage_manager = GoogleDriveStorageManager(
             credentials_file=creds_file,
@@ -380,22 +411,16 @@ def initialize_storage_manager():
             folder_name=folder_name
         )
         # Trigger authentication immediately upon initialization for GDrive
-        # Run in a thread to avoid blocking if called from main thread
         auth_thread = threading.Thread(target=_current_storage_manager.authenticate, daemon=True)
         auth_thread.start()
-        # Note: We don't wait for auth here; operations will fail until auth completes
         
     else: # Default to local
-        local_path = settings.get("local_storage_path") # Can be None
+        local_path = settings.get("local_storage_path")
         _current_storage_manager = LocalStorageManager(
             filename=history_filename,
             storage_path=local_path
         )
-        # Local storage doesn't need explicit authentication
-        _current_storage_manager.authenticate() # Call for consistency, logs message
+        _current_storage_manager.authenticate()
 
     return _current_storage_manager
-
-# Initialize on module load
-# initialize_storage_manager() # Defer initialization until needed by GUI or Orchestrator
 

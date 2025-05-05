@@ -1,0 +1,9 @@
+open_app:
+  paths:
+    Windows:
+      firefox: "C:\\Program Files\\Mozilla Firefox\\firefox.exe"
+      code: "C:\\Users\\%USERNAME%\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"
+      # Add more common Windows application paths here as needed
+      notepad: "C:\\Windows\\System32\\notepad.exe"
+      explorer: "C:\\Windows\\explorer.exe"
+
