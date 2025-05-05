@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 import customtkinter as ctk
 import tkinter as tk
 import tkinter.messagebox as messagebox
@@ -8,7 +10,8 @@ import logging
 from pathlib import Path # Added for path handling
 
 # Import backend components
-from src.core.orchestrator import Orchestrator
+# Use route_command_stream from orchestrator
+from src.core.orchestrator import Orchestrator 
 from src.core.storage_manager import get_storage_manager, save_settings, load_settings, GoogleDriveStorageManager, initialize_storage_manager
 
 # Configure basic logging for the GUI
@@ -157,7 +160,7 @@ class SettingsWindow(ctk.CTkToplevel):
              # Note: We don't save this temporary change
 
         creds_file = temp_settings.get("google_drive_credentials_file", "credentials.json")
-        token_file = temp_settings.get("google_drive_token_file", "token.pickle")
+        token_file = temp_settings.get("google_drive_token_file", "token.json") # Changed from pickle
         folder_name = temp_settings.get("google_drive_folder_name", "Jarvis-Core History")
         history_filename = temp_settings.get("history_filename", "jarvis_chat_history.json")
 
@@ -179,16 +182,16 @@ class SettingsWindow(ctk.CTkToplevel):
         """Worker thread for Google Drive authentication."""
         try:
             success = gdrive_manager.authenticate(force_reauth=True)
+            # Use after() to safely update GUI from thread
             if success:
                 logging.info("Google Drive authentication successful in thread.")
-                # Optionally show success message - needs careful GUI update from thread
-                # self.parent.after(0, lambda: messagebox.showinfo("Success", "Google Drive authenticated successfully.", parent=self))
+                self.parent.after(0, lambda: messagebox.showinfo("Success", "Google Drive authenticated successfully.", parent=self.parent))
             else:
                 logging.warning("Google Drive authentication failed or was cancelled in thread.")
-                # self.parent.after(0, lambda: messagebox.showwarning("Authentication Failed", "Google Drive authentication failed or was cancelled.", parent=self))
+                self.parent.after(0, lambda: messagebox.showwarning("Authentication Failed", "Google Drive authentication failed or was cancelled.", parent=self.parent))
         except Exception as e:
             logging.exception("Error during Google Drive authentication thread.")
-            # self.parent.after(0, lambda: messagebox.showerror("Authentication Error", f"An error occurred during Google Drive authentication: {e}", parent=self))
+            self.parent.after(0, lambda: messagebox.showerror("Authentication Error", f"An error occurred during Google Drive authentication: {e}", parent=self.parent))
 
     def save_and_close(self):
         """Saves all settings, notifies parent to restart backend, and closes."""
@@ -244,7 +247,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         self.destroy() # Close the settings window
 
-# --- Main Chat Window --- (Modified)
+# --- Main Chat Window --- (Modified for Streaming)
 class ChatWindow(ctk.CTk):
     """Main chat window for the Jarvis-Core AI Agent."""
 
@@ -285,6 +288,8 @@ class ChatWindow(ctk.CTk):
         self.orchestrator = None
         self.storage_manager = None # Use unified manager
         self.response_queue = queue.Queue()
+        self.is_first_chunk = True # State for streaming display
+        self.current_response_sender = None # Track sender for multi-chunk response
         self.init_backend_and_storage()
 
         # Start checking the queue for responses
@@ -297,6 +302,17 @@ class ChatWindow(ctk.CTk):
         self.load_and_display_history()
 
         self.display_message("System", "Initializing backend AI... Please wait.")
+        threading.Thread(target=self._init_orchestrator_thread, daemon=True).start()
+
+    def reinitialize_backend(self):
+        """Re-initializes storage and orchestrator after settings change."""
+        self.display_message("System", "Settings changed. Re-initializing backend components...")
+        # Re-init storage first
+        self.reinitialize_storage()
+        # Re-init orchestrator
+        self.display_message("System", "Re-initializing backend AI... Please wait.")
+        # Clear old orchestrator if exists
+        self.orchestrator = None 
         threading.Thread(target=self._init_orchestrator_thread, daemon=True).start()
 
     def reinitialize_storage(self):
@@ -348,7 +364,8 @@ class ChatWindow(ctk.CTk):
         """Worker thread function to initialize the orchestrator."""
         try:
             self.orchestrator = Orchestrator()
-            if self.orchestrator and self.orchestrator.agent:
+            # Check if either RAG or Agent is available
+            if self.orchestrator and (self.orchestrator.rag_chain or self.orchestrator.agent):
                 logging.info("Orchestrator initialized successfully in thread.")
                 self.response_queue.put(("System", "Backend AI ready. How can I assist you?"))
             else:
@@ -359,9 +376,11 @@ class ChatWindow(ctk.CTk):
             self.response_queue.put(("System", f"Critical Error: Backend AI failed: {e}"))
 
     def send_message_event(self, event):
+        """Handles sending message when Enter key is pressed."""
         self.send_message()
 
     def send_message(self):
+        """Sends the user message to the backend for processing."""
         user_input = self.input_entry.get()
         if not user_input.strip(): return
 
@@ -372,58 +391,124 @@ class ChatWindow(ctk.CTk):
 
         self.input_entry.delete(0, "end")
 
-        if self.orchestrator and self.orchestrator.agent:
+        # Check if orchestrator is ready (either RAG or Agent)
+        if self.orchestrator and (self.orchestrator.rag_chain or self.orchestrator.agent):
             self.input_entry.configure(state="disabled")
             self.send_button.configure(state="disabled")
-            self.display_message("System", "Processing...")
-            threading.Thread(target=self._get_backend_response_thread, args=(user_input,), daemon=True).start()
+            self.display_message("System", "Processing...") # Display processing message
+            self.is_first_chunk = True # Reset for the new response stream
+            self.current_response_sender = "Jarvis" # Assume Jarvis will respond
+            # Start the streaming response thread
+            threading.Thread(target=self._get_backend_response_stream_thread, args=(user_input,), daemon=True).start()
         else:
             self.display_message("System", "Error: Backend AI is not available.")
             # Save a placeholder response if backend fails
             if self.storage_manager:
                 self.storage_manager.save_message("System", "Error: Backend AI is not available.")
 
-    def _get_backend_response_thread(self, user_input: str):
-        response = "Error: Processing failed."
+    def _get_backend_response_stream_thread(self, user_input: str):
+        """Worker thread to get and queue response chunks via streaming."""
+        full_response = ""
+        sender = "Jarvis" # Default sender
         try:
-            response = self.orchestrator.route_command(user_input)
-            self.response_queue.put(("Jarvis", response))
+            # Use the streaming method
+            for chunk in self.orchestrator.route_command_stream(user_input):
+                if chunk: # Ensure chunk is not empty
+                    full_response += chunk
+                    # Determine sender based on chunk content (e.g., error messages)
+                    if "[Error" in chunk or "[Sorry" in chunk:
+                        sender = "System"
+                    self.response_queue.put((sender, chunk))
+            # Signal end of stream
+            self.response_queue.put((sender, None)) 
         except Exception as e:
-            logging.exception("Error getting response from orchestrator thread.")
-            response = f"Error processing request: {e}"
-            self.response_queue.put(("System", response))
+            logging.exception("Error getting response stream from orchestrator thread.")
+            error_message = f"Error processing request stream: {e}"
+            full_response = error_message # Store error as the full response for history
+            sender = "System"
+            self.response_queue.put((sender, error_message))
+            self.response_queue.put((sender, None)) # Signal end even on error
         finally:
-            # Save Jarvis/System response
-            if self.storage_manager:
-                sender = "Jarvis" if "Error" not in response else "System"
-                self.storage_manager.save_message(sender, response)
+            # Save the complete reconstructed response to history
+            if self.storage_manager and full_response:
+                self.storage_manager.save_message(sender, full_response.strip())
 
     def check_response_queue(self):
+        """Checks the queue for response chunks and updates the display."""
         try:
             while True:
-                sender, message = self.response_queue.get_nowait()
-                # Re-enable input after response or error
-                self.input_entry.configure(state="normal")
-                self.send_button.configure(state="normal")
-                # Remove "Processing..." message - simplistic approach:
-                # If the last message was "Processing...", remove it before adding new one.
-                # This requires reading the last line, which is complex in Text widget.
-                # For now, we just display the new message.
-                self.display_message(sender, message)
+                sender, message_chunk = self.response_queue.get_nowait()
+                
+                if message_chunk is None: # End of stream signal
+                    # Re-enable input
+                    self.input_entry.configure(state="normal")
+                    self.send_button.configure(state="normal")
+                    # Add a final newline if needed after the last chunk
+                    if not self.is_first_chunk: # Only if chunks were received
+                        self.append_message_chunk("", "\n\n") # Add spacing after response
+                else:
+                    # If this is the first chunk, remove the "Processing..." message
+                    if self.is_first_chunk:
+                        self.remove_last_message() # Remove "Processing..."
+                        self.current_response_sender = sender # Set sender for this response stream
+                    
+                    # Append the chunk to the display
+                    self.append_message_chunk(sender, message_chunk)
+                    self.is_first_chunk = False # No longer the first chunk
+
         except queue.Empty:
-            pass
+            pass # No messages in queue
+        except Exception as e:
+            logging.error(f"Error processing response queue: {e}", exc_info=True)
         finally:
+            # Schedule the next check
             self.after(100, self.check_response_queue)
 
     def display_message(self, sender: str, message: str):
+        """Displays a complete message (e.g., User input, System status)."""
         try:
             self.chat_display.configure(state="normal")
             formatted_message = f"{sender}: {message}\n\n"
             self.chat_display.insert("end", formatted_message)
             self.chat_display.configure(state="disabled")
             self.chat_display.see("end")
+            self.is_first_chunk = True # Reset chunk state for next potential stream
         except Exception as e:
             logging.error(f"Error displaying message: {e}")
+
+    def append_message_chunk(self, sender: str, chunk: str):
+        """Appends a chunk of a streamed message to the display."""
+        try:
+            self.chat_display.configure(state="normal")
+            if self.is_first_chunk:
+                # Add sender prefix only for the very first chunk of a response
+                self.chat_display.insert("end", f"{self.current_response_sender}: {chunk}")
+            else:
+                # Append subsequent chunks directly
+                self.chat_display.insert("end", chunk)
+            self.chat_display.configure(state="disabled")
+            self.chat_display.see("end") # Scroll to the end
+        except Exception as e:
+            logging.error(f"Error appending message chunk: {e}")
+
+    def remove_last_message(self):
+        """Removes the last message block (sender + message + newlines) from the display."""
+        try:
+            self.chat_display.configure(state="normal")
+            # Get all content
+            content = self.chat_display.get("1.0", "end-1c") # Exclude final newline
+            # Find the start of the last message (look for second-to-last double newline)
+            last_message_start = content.rfind("\n\n", 0, len(content) - 2) # Find before the last \n\n
+            if last_message_start == -1: # Only one message
+                self.chat_display.delete("1.0", "end")
+            else:
+                # Delete from the start of the last message block (+2 to go past \n\n)
+                self.chat_display.delete(f"{last_message_start + 2}.0", "end")
+            self.chat_display.configure(state="disabled")
+        except Exception as e:
+            logging.error(f"Error removing last message: {e}")
+            # If error, just clear and hope for the best or leave it
+            # self.clear_chat_display()
 
     def open_settings(self):
         """Opens the settings window."""

@@ -5,10 +5,27 @@ import logging
 from pathlib import Path
 import importlib
 import inspect # Added for dynamic loading
-from langchain.agents import Tool, initialize_agent, AgentType
+from typing import Iterator, Dict, Any # Added for streaming
+
+# Langchain imports
+from langchain.agents import Tool, initialize_agent, AgentType # Keep for potential fallback or future use
 from langchain.tools.base import BaseTool # Added for type checking
 from langchain.memory import ConversationBufferWindowMemory
-from langchain.schema import SystemMessage
+from langchain.schema import SystemMessage, StrOutputParser
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.schema.runnable import RunnablePassthrough
+
+# Attempt RAG imports, handle gracefully if packages not installed
+try:
+    from langchain_community.vectorstores import Chroma
+    from langchain_community.embeddings import SentenceTransformerEmbeddings
+    RAG_ENABLED = True
+except ImportError:
+    logging.warning("RAG dependencies (chromadb, sentence-transformers) not found. RAG features will be disabled.")
+    Chroma = None
+    SentenceTransformerEmbeddings = None
+    RAG_ENABLED = False
+
 from dotenv import load_dotenv
 
 from .llm_manager import LLMLoader
@@ -20,11 +37,16 @@ load_dotenv()
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Define paths relative to the script location or project root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+VECTOR_STORE_DIR = PROJECT_ROOT / "vector_store"
+EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+
 class Orchestrator:
-    """Manages the interaction flow, loading the LLM and routing commands to appropriate skills."""
+    """Manages the interaction flow, loading the LLM, tools, memory, and integrating RAG."""
 
     def __init__(self):
-        """Initializes the Orchestrator, loading the LLM, tools, memory, and custom prompt."""
+        """Initializes the Orchestrator, loading LLM, tools, memory, and setting up RAG chain or fallback agent."""
         logging.info("Initializing Orchestrator...")
         self.settings = load_settings()
         self.llm_loader = LLMLoader()
@@ -33,52 +55,115 @@ class Orchestrator:
         if self.llm is None:
             logging.error("LLM failed to load. Orchestrator cannot function without an LLM.")
             self.agent = None
+            self.rag_chain = None
             return
 
         self.tools = self._load_tools()
+        self.retriever = None
+        self.rag_chain = None
+        self.agent = None # Initialize agent as None
 
-        try:
-            self.max_context_turns = int(os.getenv("MAX_CONTEXT_TURNS", 5))
-            if self.max_context_turns <= 0:
+        # --- RAG Setup --- 
+        if RAG_ENABLED:
+            try:
+                logging.info("Attempting to initialize RAG components...")
+                if not VECTOR_STORE_DIR.exists():
+                    logging.warning(f"Vector store directory 	'{VECTOR_STORE_DIR}' not found. RAG will not function until the store is built.")
+                else:
+                    # Initialize embeddings (ensure this matches the builder)
+                    embeddings = SentenceTransformerEmbeddings(model_name=EMBEDDING_MODEL_NAME)
+                    # Load the persistent vector store
+                    vector_store = Chroma(
+                        persist_directory=str(VECTOR_STORE_DIR),
+                        embedding_function=embeddings
+                    )
+                    self.retriever = vector_store.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3} # Retrieve top 3 relevant chunks
+                    )
+                    logging.info(f"Successfully loaded vector store from {VECTOR_STORE_DIR} and created retriever.")
+
+                    # Define RAG Prompt Template
+                    rag_prompt_template = """
+                    You are an assistant for question-answering tasks. 
+                    Use the following pieces of retrieved context to answer the question. 
+                    If you don't know the answer, just say that you don't know. 
+                    Use three sentences maximum and keep the answer concise.
+                    
+                    Context: {context}
+                    
+                    Question: {question}
+                    
+                    Answer:"""
+                    rag_prompt = ChatPromptTemplate.from_template(rag_prompt_template)
+
+                    # Define RAG Chain using LCEL
+                    self.rag_chain = (
+                        {"context": self.retriever, "question": RunnablePassthrough()}
+                        | rag_prompt
+                        | self.llm
+                        | StrOutputParser()
+                    )
+                    logging.info("RAG chain initialized successfully.")
+
+            except Exception as e:
+                logging.error(f"Failed to initialize RAG components: {e}. RAG will be disabled.", exc_info=True)
+                self.retriever = None
+                self.rag_chain = None
+        # --- End RAG Setup ---
+
+        # --- Fallback Agent Setup (If RAG is disabled or failed) ---
+        if self.rag_chain is None:
+            logging.info("RAG is disabled or failed to initialize. Setting up standard conversational agent.")
+            try:
+                self.max_context_turns = int(os.getenv("MAX_CONTEXT_TURNS", 5))
+                if self.max_context_turns <= 0:
+                    self.max_context_turns = 5
+            except ValueError:
                 self.max_context_turns = 5
-        except ValueError:
-            self.max_context_turns = 5
-        logging.info(f"Using conversation memory window size (k): {self.max_context_turns * 2}")
-        self.memory = ConversationBufferWindowMemory(
-            memory_key="chat_history",
-            return_messages=True,
-            k=self.max_context_turns * 2
-        )
-
-        system_prompt_content = self._load_system_prompt()
-        system_message = SystemMessage(content=system_prompt_content)
-        agent_kwargs = {"system_message": system_message}
-
-        try:
-            if not self.tools:
-                 logging.warning("No tools were loaded. Agent will only use LLM knowledge.")
-                 # Decide if agent should still initialize without tools
-                 # For now, let it initialize but it won't be very useful
-
-            self.agent = initialize_agent(
-                self.tools if self.tools else [], # Pass empty list if no tools
-                self.llm,
-                agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-                memory=self.memory,
-                agent_kwargs=agent_kwargs,
-                verbose=True,
-                handle_parsing_errors=True
+            logging.info(f"Using conversation memory window size (k): {self.max_context_turns * 2}")
+            self.memory = ConversationBufferWindowMemory(
+                memory_key="chat_history",
+                return_messages=True,
+                k=self.max_context_turns * 2
             )
-            logging.info("Orchestrator initialized successfully with agent.")
-        except Exception as e:
-            logging.error(f"Failed to initialize agent: {e}", exc_info=True)
-            self.agent = None
+
+            system_prompt_content = self._load_system_prompt()
+            system_message = SystemMessage(content=system_prompt_content)
+            agent_kwargs = {
+                "system_message": system_message,
+                "extra_prompt_messages": [MessagesPlaceholder(variable_name="chat_history")] # Required for CONVERSATIONAL_REACT_DESCRIPTION
+            }
+
+            try:
+                if not self.tools:
+                    logging.warning("No tools were loaded. Agent will only use LLM knowledge.")
+                
+                self.agent = initialize_agent(
+                    self.tools if self.tools else [],
+                    self.llm,
+                    agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
+                    memory=self.memory,
+                    agent_kwargs=agent_kwargs,
+                    verbose=True,
+                    handle_parsing_errors=True,
+                    max_iterations=5 # Add max iterations to prevent loops
+                )
+                logging.info("Fallback conversational agent initialized successfully.")
+            except Exception as e:
+                logging.error(f"Failed to initialize fallback agent: {e}", exc_info=True)
+                self.agent = None
+        # --- End Fallback Agent Setup ---
+
+        if self.rag_chain is None and self.agent is None:
+            logging.error("CRITICAL: Failed to initialize both RAG chain and fallback agent. Orchestrator cannot process commands.")
+        else:
+             logging.info("Orchestrator initialized.")
 
     def _load_system_prompt(self) -> str:
         """Loads the system prompt from the path specified in settings or default."""
         custom_prompt_path_str = self.settings.get("system_prompt_path")
-        # Corrected default path finding relative to this file
-        default_prompt_path = Path(__file__).resolve().parent.parent / "config" / "prompts" / "system_prompt.txt"
+        default_prompt_path = PROJECT_ROOT / "config" / "prompts" / "system_prompt.txt"
         prompt_path = default_prompt_path
 
         if custom_prompt_path_str:
@@ -98,8 +183,11 @@ class Orchestrator:
             prompt_path.parent.mkdir(parents=True, exist_ok=True)
             if not prompt_path.exists():
                  logging.warning(f"Prompt file {prompt_path} not found. Creating with default content.")
+                 # More generic default prompt
+                 default_content = "You are a helpful AI assistant. Use the tools provided when necessary."
                  with open(prompt_path, "w", encoding="utf-8") as f:
-                     f.write("You are Jarvis, a helpful AI assistant. Respond concisely and accurately.")
+                     f.write(default_content)
+                 return default_content
 
             with open(prompt_path, "r", encoding="utf-8") as f:
                 return f.read()
@@ -111,8 +199,7 @@ class Orchestrator:
         """Dynamically loads tools decorated with @tool from the skills directory."""
         logging.info("Dynamically loading tools from skills directory...")
         tools_list = []
-        # Corrected path finding relative to this file
-        skills_dir = Path(__file__).resolve().parent.parent / "skills"
+        skills_dir = PROJECT_ROOT / "src" / "skills"
         
         if not skills_dir.is_dir():
             logging.error(f"Skills directory not found at {skills_dir}. Cannot load tools.")
@@ -123,7 +210,6 @@ class Orchestrator:
                 continue
 
             module_name = filepath.stem
-            # Construct the full module path relative to the 'src' directory
             module_path = f"src.skills.{module_name}"
             
             try:
@@ -131,17 +217,10 @@ class Orchestrator:
                 module = importlib.import_module(module_path)
                 logging.debug(f"Successfully imported module: {module_path}")
 
-                # Inspect the module for functions decorated with @tool
-                # LangChain's @tool typically replaces the function with a Tool instance
                 for name, obj in inspect.getmembers(module):
-                    # Check if the object is an instance of BaseTool (which Tool inherits from)
                     if isinstance(obj, BaseTool):
                         logging.info(f"Found tool: {obj.name} in module {module_name}")
                         tools_list.append(obj)
-                    # Alternative check (less robust): Check if it's a function with specific metadata
-                    # elif inspect.isfunction(obj) and hasattr(obj, '__is_tool') and obj.__is_tool:
-                    #     logging.info(f"Found decorated function: {name} in module {module_name}")
-                    #     tools_list.append(obj) # Assuming @tool adds metadata
 
             except ImportError as e:
                 logging.error(f"Failed to import skill module {module_path}: {e}", exc_info=True)
@@ -155,40 +234,79 @@ class Orchestrator:
             
         return tools_list
 
-    def route_command(self, user_input: str):
-        """Routes the user's command to the appropriate skill via the LangChain agent."""
-        logging.info(f"Routing command: {user_input}")
-        if not self.agent:
-            error_msg = "Agent is not initialized (likely due to LLM or tool loading failure). Cannot process command."
-            logging.error(error_msg)
-            return error_msg
+    def route_command_stream(self, user_input: str) -> Iterator[str]:
+        """Routes the user's command, yielding response chunks via streaming."""
+        logging.info(f"Routing command (streaming): {user_input}")
+        
+        # Prioritize RAG chain if available and seems relevant
+        if self.rag_chain and self.retriever: 
+             is_question = "?" in user_input or user_input.lower().startswith(("what", "who", "where", "when", "why", "how", "explain", "tell me about"))
+             if is_question:
+                 logging.info("Input looks like a question, attempting RAG stream...")
+                 try:
+                     # Stream directly from the RAG chain
+                     for chunk in self.rag_chain.stream(user_input):
+                         yield chunk
+                     return # Stop processing if RAG stream succeeded
+                 except Exception as e:
+                     error_msg = f"Error during RAG chain streaming: {e}"
+                     logging.error(error_msg, exc_info=True)
+                     yield f"\n[Error during RAG: {e}]\n" # Yield error chunk
+                     # Fall through to agent if RAG fails
+             else:
+                 logging.info("Input does not look like a question, using standard agent stream.")
 
-        try:
-            response = self.agent.invoke({"input": user_input})
-            output = response.get('output', "Agent did not return a standard output.")
-            logging.info(f"Agent response: {output}")
-            return output
-        except Exception as e:
-            error_msg = f"Error during agent execution: {e}"
-            logging.error(error_msg, exc_info=True)
-            return "Sorry, I encountered an error while processing your request. Please check the logs for details."
+        # Fallback to standard agent stream if RAG is not used or fails
+        if self.agent:
+            logging.info("Using standard conversational agent stream...")
+            try:
+                # Agent stream yields dictionaries with steps and final response
+                # We need to extract the actual response chunk
+                for chunk in self.agent.stream({"input": user_input}):
+                    # Check for final answer chunk (structure might vary by agent type)
+                    if "output" in chunk:
+                        yield chunk["output"]
+                    # Optionally, yield intermediate steps if needed for debugging/UI
+                    # elif "actions" in chunk:
+                    #     yield f"\n[Action: {chunk['actions']}]\n"
+                    # elif "intermediate_step" in chunk:
+                    #     yield f"\n[Step: {chunk['intermediate_step']}]\n"
+            except Exception as e:
+                error_msg = f"Error during agent streaming: {e}"
+                logging.error(error_msg, exc_info=True)
+                yield f"\n[Sorry, I encountered an error while processing your request: {e}]\n"
+        else:
+            error_msg = "Neither RAG chain nor fallback agent is initialized. Cannot process command."
+            logging.error(error_msg)
+            yield f"\n[{error_msg}]\n"
 
 # Example usage (for testing purposes)
 if __name__ == "__main__":
-    print("Testing Orchestrator with dynamic tool loading...")
+    print("Testing Orchestrator with RAG integration and streaming (if available)...")
     try:
         orchestrator = Orchestrator()
-        if orchestrator.agent:
+        if orchestrator.rag_chain or orchestrator.agent:
             print("Orchestrator initialized.")
-            print(f"Loaded tools: {[tool.name for tool in orchestrator.tools]}")
-            # Example command (requires LLM model)
-            # command = "Copy my_notes.txt to backups/notes_backup.txt"
-            # print(f"Sending command: {command}")
-            # result = orchestrator.route_command(command)
-            # print(f"Result: {result}")
+            if orchestrator.rag_chain:
+                print("RAG chain is active.")
+            if orchestrator.agent:
+                 print(f"Fallback agent is active with tools: {[tool.name for tool in orchestrator.tools]}")
+            
+            # Example command (requires LLM model and potentially vector store)
+            command = "What is TARVIS?" # Should trigger RAG if store exists
+            # command = "Calculate 5 * 12" # Should trigger agent tool
+            print(f"\nSending command: {command}")
+            print("Streaming response:")
+            full_response = ""
+            for chunk in orchestrator.route_command_stream(command):
+                print(chunk, end="", flush=True) # Print chunk without newline
+                full_response += chunk
+            print("\n--- End of Stream ---")
+            # print(f"\nFull reconstructed response: {full_response}")
+
         else:
             print("Orchestrator initialization failed. Check logs.")
     except Exception as e:
-        print(f"Error during Orchestrator test: {e}")
-    print("Orchestrator test script finished.")
+        print(f"\nError during Orchestrator test: {e}")
+    print("\nOrchestrator test script finished.")
 

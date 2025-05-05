@@ -1,0 +1,1 @@
+This is a sample document about the TARVIS project. TARVIS is a local AI agent designed to assist users with various tasks using skills and a language model. It features dynamic skill loading and Retrieval-Augmented Generation (RAG) capabilities.

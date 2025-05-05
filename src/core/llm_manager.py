@@ -143,7 +143,7 @@ class LLMLoader:
             try:
                 # Determine device based on USE_GPU setting
                 device_setting = "gpu" if self.use_gpu else "cpu"
-                logging.info(f"Attempting to load model: {self.model_path} with device='{device_setting}' and mlock={self.use_mlock}")
+                logging.info(f"Attempting to load model: {self.model_path} with device='{device_setting}', mlock={self.use_mlock}, streaming=True")
                 # Note: n_gpu_layers is removed as it's not supported by GPT4All directly anymore.
                 # GPU offloading might be handled internally by llama.cpp based on device or other backend settings.
                 llm = GPT4All(
@@ -152,9 +152,10 @@ class LLMLoader:
                     # n_gpu_layers=self.n_gpu_layers, # REMOVED - Causes validation error
                     use_mlock=self.use_mlock,
                     n_threads=int(os.getenv("N_THREADS", 8)),
+                    streaming=True, # Enable streaming
                     verbose=True
                 )
-                logging.info("LLM loaded successfully.")
+                logging.info("LLM loaded successfully with streaming enabled.")
                 return llm
             except Exception as e:
                 logging.error(f"Failed to load LLM: {e}", exc_info=True)
@@ -185,4 +186,5 @@ if __name__ == "__main__":
     # else:
     #     print("Failed to load LLM instance.")
     print("\nLLMLoader test script finished. Manual check required if model file exists.")
+
 
