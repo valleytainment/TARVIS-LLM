@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import importlib
 import inspect # Added for dynamic loading
-from typing import Iterator, Dict, Any # Added for streaming
+from typing import Iterator, Dict, Any, Optional # Added for streaming and settings
 
 # Langchain imports
 from langchain.agents import Tool, initialize_agent, AgentType # Keep for potential fallback or future use
@@ -29,7 +29,7 @@ except ImportError:
 from dotenv import load_dotenv
 
 from .llm_manager import LLMLoader
-from .storage_manager import load_settings
+from .storage_manager import load_settings # Keep for default if settings not passed
 
 # Load environment variables
 load_dotenv()
@@ -45,11 +45,20 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 class Orchestrator:
     """Manages the interaction flow, loading the LLM, tools, memory, and integrating RAG."""
 
-    def __init__(self):
-        """Initializes the Orchestrator, loading LLM, tools, memory, and setting up RAG chain or fallback agent."""
+    # Modified __init__ to accept optional settings
+    def __init__(self, settings: Optional[Dict[str, Any]] = None):
+        """Initializes the Orchestrator, loading LLM, tools, memory, and setting up RAG chain or fallback agent.
+        
+        Args:
+            settings (Optional[Dict[str, Any]]): Application settings dictionary. If None, loads from file.
+        """
         logging.info("Initializing Orchestrator...")
-        self.settings = load_settings()
-        self.llm_loader = LLMLoader()
+        # Use provided settings or load from file
+        self.settings = settings if settings is not None else load_settings()
+        
+        # TODO: Add logic here to select LLM based on self.settings["active_llm_provider"]
+        # For now, it still uses the LLMLoader which relies on .env or defaults
+        self.llm_loader = LLMLoader() 
         self.llm = self.llm_loader.load()
 
         if self.llm is None:
@@ -284,7 +293,10 @@ class Orchestrator:
 if __name__ == "__main__":
     print("Testing Orchestrator with RAG integration and streaming (if available)...")
     try:
-        orchestrator = Orchestrator()
+        # Test initialization with settings passed
+        test_settings = load_settings()
+        orchestrator = Orchestrator(settings=test_settings)
+        
         if orchestrator.rag_chain or orchestrator.agent:
             print("Orchestrator initialized.")
             if orchestrator.rag_chain:
