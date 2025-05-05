@@ -45,10 +45,10 @@ def load_app_paths():
                     }
                 }
             }
-            with open(config_path, \'w\') as f:
+            with open(config_path, 'w') as f:
                 yaml.dump(default_config, f, default_flow_style=False)
 
-        with open(config_path, \'r\') as f:
+        with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
             # Get paths for the current OS
             os_name = platform.system()

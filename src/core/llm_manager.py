@@ -51,7 +51,7 @@ class LLMLoader:
         try:
             # Default to -1 for n_gpu_layers if USE_GPU is true, 0 otherwise
             # This lets llama.cpp decide how many layers to offload if not specified
-            default_gpu_layers = -1 if self.use_gpu else 0 
+            default_gpu_layers = -1 if self.use_gpu else 0
             self.n_gpu_layers = int(os.getenv("N_GPU_LAYERS", default_gpu_layers))
             # Allow -1 as a valid value (means max possible layers)
             if self.n_gpu_layers < -1:
@@ -65,7 +65,7 @@ class LLMLoader:
 
         self.quant_preference = os.getenv("LLM_QUANT_PREFERENCE", DEFAULT_QUANT)
         if self.quant_preference not in SUPPORTED_QUANTS:
-            logging.warning(f"Invalid LLM_QUANT_PREFERENCE 		'{self.quant_preference}'		. Must be one of {list(SUPPORTED_QUANTS.keys())}. Defaulting to {DEFAULT_QUANT}.")
+            logging.warning(f"Invalid LLM_QUANT_PREFERENCE '{self.quant_preference}'. Must be one of {list(SUPPORTED_QUANTS.keys())}. Defaulting to {DEFAULT_QUANT}.")
             self.quant_preference = DEFAULT_QUANT
         # --- End Performance/Configuration Settings ---
 
@@ -80,12 +80,12 @@ class LLMLoader:
             project_root = Path(__file__).resolve().parent.parent.parent
             model_dir_base = os.getenv("MODEL_DIR", str(project_root / "models"))
             self.model_path = str(Path(model_dir_base).resolve() / self.model_name)
-            logging.info(f"Using default LLM model path based on preference 		'{self.quant_preference}'		: {self.model_path}")
+            logging.info(f"Using default LLM model path based on preference '{self.quant_preference}': {self.model_path}")
 
         logging.info(
             f"LLMLoader Initialized: Model={self.model_name}, Path={self.model_path}, "
-            f"Use GPU={self.use_gpu}, GPU Layers={self.n_gpu_layers}, " # Updated log
-            f"Use MLock={self.use_mlock}, Quant Preference=		'{self.quant_preference}'		" # Closing quote added
+            f"Use GPU={self.use_gpu}, GPU Layers={self.n_gpu_layers}, "
+            f"Use MLock={self.use_mlock}, Quant Preference='{self.quant_preference}'"
         )
 
     def _download_default_model(self, model_dir):
@@ -134,7 +134,7 @@ class LLMLoader:
             if is_default_path and self.model_name in SUPPORTED_QUANTS.values():
                 if not self._download_default_model(model_dir):
                     return None
-                model_file_path = Path(self.model_path)
+                model_file_path = Path(self.model_path) # Update path after potential download
             else:
                 error_msg = f"Model file not found at specified path {self.model_path}. Please ensure the file exists or configure the correct path in settings."
                 logging.error(error_msg)
@@ -143,27 +143,27 @@ class LLMLoader:
 
         if model_file_path.exists():
             try:
-                # --- Prepare backend_kwargs for GPU layers ---
-                backend_kwargs = {}
-                if self.use_gpu:
-                    # Pass n_gpu_layers only if GPU is enabled
-                    # GPT4All/llama.cpp uses n_gpu_layers. -1 means offload all possible layers.
-                    backend_kwargs["n_gpu_layers"] = self.n_gpu_layers 
-                    logging.info(f"GPU enabled. Passing n_gpu_layers={self.n_gpu_layers} to backend.")
-                else:
-                    logging.info("GPU not enabled. n_gpu_layers setting ignored.")
+                # --- Prepare backend_kwargs for GPU layers (COMMENTED OUT) ---
+                # backend_kwargs = {}
+                # if self.use_gpu:
+                #     backend_kwargs["n_gpu_layers"] = self.n_gpu_layers
+                #     logging.info(f"GPU enabled. Passing n_gpu_layers={self.n_gpu_layers} to backend.")
+                # else:
+                #     logging.info("GPU not enabled. n_gpu_layers setting ignored.")
                 # --- End backend_kwargs preparation ---
 
                 # Note: GPT4All doesn't directly use `device` kwarg like some other LangChain LLMs.
-                # It relies on backend compilation flags and potentially backend_kwargs.
-                # We keep the logging informative but remove the `device` parameter if it's not used.
-                logging.info(f"Attempting to load model: {self.model_path} with n_threads={int(os.getenv(	'N_THREADS'	, 8))}, mlock={self.use_mlock}, streaming=True, backend_kwargs={backend_kwargs}")
-                
+                # It relies on backend compilation flags.
+                # backend_kwargs removed due to ValidationError in current GPT4All version.
+                # GPU layer offloading via N_GPU_LAYERS might not work with this wrapper.
+                # Consider using LlamaCpp directly if GPU offloading is critical.
+                logging.info(f"Attempting to load model: {self.model_path} with n_threads={int(os.getenv('N_THREADS', 8))}, mlock={self.use_mlock}, streaming=True")
+
                 llm = GPT4All(
                     model=self.model_path,
-                    backend_kwargs=backend_kwargs, # Pass GPU layers here
+                    # backend_kwargs=backend_kwargs, # Removed: Causes ValidationError
                     use_mlock=self.use_mlock,
-                    n_threads=int(os.getenv("N_THREADS", 8)),
+                    n_threads=int(os.getenv('N_THREADS', 8)), # Use single quotes inside f-string
                     streaming=True,
                     verbose=True
                 )
@@ -172,10 +172,11 @@ class LLMLoader:
             except Exception as e:
                 logging.error(f"Failed to load LLM: {e}", exc_info=True)
                 if self.use_gpu:
-                    logging.warning("GPU loading failed. Ensure CUDA/ROCm drivers and compatible llama-cpp-python (with GPU support) are installed. Check backend_kwargs.")
+                    logging.warning("GPU loading failed. Ensure CUDA/ROCm drivers and compatible llama-cpp-python (with GPU support) are installed.")
                 print(f"ERROR: Failed to load LLM - {e}")
                 return None
         else:
+            # This case should ideally not be reached if download logic works
             logging.error(f"Model file still not found at {self.model_path} after download attempt.")
             return None
 
@@ -186,7 +187,7 @@ if __name__ == "__main__":
     print(f"Model path determined as: {loader.model_path}")
     print(f"Model Name: {loader.model_name}")
     print(f"Use GPU Setting: {loader.use_gpu}")
-    print(f"GPU Layers Setting: {loader.n_gpu_layers}") # Updated log
+    print(f"GPU Layers Setting: {loader.n_gpu_layers}")
     print(f"Use MLock: {loader.use_mlock}")
     print(f"Quant Preference: {loader.quant_preference}")
     print(f"Checking if model exists at path: {os.path.exists(loader.model_path)}")

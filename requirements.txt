@@ -45,3 +45,5 @@ langchainhub
 
 langchain-openai
 langchain-deepseek
+
+langchain-huggingface

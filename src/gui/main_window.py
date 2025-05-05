@@ -24,10 +24,11 @@ except ImportError:
 
 # Attempt to import RAG builder function for UI integration
 try:
-    # We don\\'t actually call it directly, but check if module exists
-    import src.rag.rag_builder 
+    # We don't actually call it directly, but check if module exists
+    import src.rag.rag_builder
     RAG_BUILDER_AVAILABLE = RAG_ENABLED # Assume builder is available if RAG deps are met
-except ImportError:
+except ImportError as e:
+    logging.error(f"Failed to import necessary LangChain components for RAG building: {e}")
     RAG_BUILDER_AVAILABLE = False
 
 # Configure basic logging for the GUI
@@ -56,7 +57,7 @@ class SettingsWindow(ctk.CTkToplevel):
         self.llm_model_path_var = ctk.StringVar(value=self.settings.get("llm_model_path") or "")
         self.system_prompt_path_var = ctk.StringVar(value=self.settings.get("system_prompt_path") or "")
         self.active_llm_provider_var = ctk.StringVar(value=self.settings.get("active_llm_provider", "local"))
-        self.rag_build_status_var = ctk.StringVar(value="") 
+        self.rag_build_status_var = ctk.StringVar(value="")
         self.gdrive_auth_status_var = ctk.StringVar(value="") # For GDrive auth feedback
 
         self.provider_vars = {}
@@ -86,7 +87,7 @@ class SettingsWindow(ctk.CTkToplevel):
         local_radio.pack(side="top", anchor="w", padx=20, pady=5)
         gdrive_radio = ctk.CTkRadioButton(storage_mode_frame, text="Google Drive", variable=self.storage_mode_var, value="google_drive", command=self.toggle_local_path_entry)
         gdrive_radio.pack(side="top", anchor="w", padx=20, pady=5)
-        
+
         # GDrive Auth Button and Status
         self.gdrive_auth_button = ctk.CTkButton(storage_mode_frame, text="Authenticate Google Drive", command=self.authenticate_gdrive_thread)
         self.gdrive_auth_button.pack(pady=(5, 0), padx=20)
@@ -94,7 +95,7 @@ class SettingsWindow(ctk.CTkToplevel):
         gdrive_status_label.pack(pady=(0, 10), padx=20)
 
         self.local_path_frame = ctk.CTkFrame(storage_tab)
-        self.local_path_frame.pack(pady=10, padx=10, fill="x") 
+        self.local_path_frame.pack(pady=10, padx=10, fill="x")
         local_path_label = ctk.CTkLabel(self.local_path_frame, text="Local Storage Directory (Optional):")
         local_path_label.pack(side="top", anchor="w", padx=10, pady=(5, 0))
         local_path_entry_frame = ctk.CTkFrame(self.local_path_frame, fg_color="transparent")
@@ -167,7 +168,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         if not RAG_BUILDER_AVAILABLE:
             self.rag_build_button.configure(state=ctk.DISABLED, text="Build RAG Index (Dependencies Missing)")
-            self.rag_build_status_var.set("Install chromadb and sentence-transformers to enable RAG.")
+            self.rag_build_status_var.set("Install chromadb and sentence-transformers/langchain-huggingface to enable RAG.")
         else:
              self.rag_build_status_var.set("Click button to build index from \'knowledge_base\' directory.")
 
@@ -223,7 +224,7 @@ class SettingsWindow(ctk.CTkToplevel):
 
         key_status_label = ctk.CTkLabel(provider_frame, textvariable=self.provider_key_status_vars[provider_name], text_color="gray")
         key_status_label.grid(row=4, column=1, padx=10, pady=(0, 5), sticky="w")
-        
+
         clear_key_button = ctk.CTkButton(provider_frame, text="Clear Stored Key", width=120, fg_color="#d9534f", hover_color="#c9302c", command=lambda p=provider_name: self.clear_stored_key(p))
         clear_key_button.grid(row=4, column=0, padx=10, pady=(0, 5), sticky="w")
         self.provider_widgets[provider_name]["clear_key_button"] = clear_key_button
@@ -248,7 +249,7 @@ class SettingsWindow(ctk.CTkToplevel):
             except Exception as e:
                 logging.error(f"Error checking key status for {provider_name}: {e}")
                 self.after(0, self.provider_key_status_vars[provider_name].set, "Error Checking Status")
-                
+
     def clear_stored_key(self, provider_name):
         if not SecureStorage:
             messagebox.showerror("Error", "Secure Storage is not available.", parent=self)
@@ -269,357 +270,414 @@ class SettingsWindow(ctk.CTkToplevel):
             # Find the browse button - assumes it's the second widget in the grid
             browse_button = self.local_path_entry.master.grid_slaves(row=0, column=1)[0]
             browse_button.configure(state=ctk.NORMAL)
-        else:
+            self.gdrive_auth_button.configure(state=ctk.DISABLED)
+        else: # google_drive
             self.local_path_entry.configure(state=ctk.DISABLED)
             browse_button = self.local_path_entry.master.grid_slaves(row=0, column=1)[0]
             browse_button.configure(state=ctk.DISABLED)
+            self.gdrive_auth_button.configure(state=ctk.NORMAL)
+            # Check initial auth status for GDrive
+            if isinstance(get_storage_manager(), GoogleDriveStorageManager):
+                if get_storage_manager().is_authenticated():
+                    self.gdrive_auth_status_var.set("Authenticated")
+                else:
+                    self.gdrive_auth_status_var.set("Not Authenticated")
+            else:
+                 self.gdrive_auth_status_var.set("Switch to GDrive mode to authenticate")
 
     def browse_directory(self):
-        dir_path = filedialog.askdirectory(title="Select Local Storage Directory")
-        if dir_path:
-            self.local_storage_path_var.set(dir_path)
+        directory = filedialog.askdirectory(parent=self)
+        if directory:
+            self.local_storage_path_var.set(directory)
 
     def browse_model_file(self):
-        file_path = filedialog.askopenfilename(title="Select LLM Model File", filetypes=[("GGUF files", "*.gguf")])
-        if file_path:
-            self.llm_model_path_var.set(file_path)
+        # Adjust filetypes based on common model formats
+        filetypes = [("GGUF files", "*.gguf"), ("All files", "*.*")]
+        filepath = filedialog.askopenfilename(parent=self, filetypes=filetypes)
+        if filepath:
+            self.llm_model_path_var.set(filepath)
 
     def browse_prompt_file(self):
-        file_path = filedialog.askopenfilename(title="Select System Prompt File", filetypes=[("Text files", "*.txt")])
-        if file_path:
-            self.system_prompt_path_var.set(file_path)
+        filetypes = [("Text files", "*.txt"), ("All files", "*.*")]
+        filepath = filedialog.askopenfilename(parent=self, filetypes=filetypes)
+        if filepath:
+            self.system_prompt_path_var.set(filepath)
 
     def authenticate_gdrive_thread(self):
         """Starts the Google Drive authentication process in a separate thread."""
-        if self.storage_mode_var.get() != "google_drive":
-            messagebox.showwarning("Mode Incorrect", "Please select \'Google Drive\' as the storage mode first.", parent=self)
-            return
-            
         self.gdrive_auth_button.configure(state=ctk.DISABLED, text="Authenticating...")
-        self.gdrive_auth_status_var.set("Starting authentication...")
+        self.gdrive_auth_status_var.set("Authentication in progress...")
         threading.Thread(target=self._gdrive_auth_worker, daemon=True).start()
 
     def _gdrive_auth_worker(self):
         """Worker function for Google Drive authentication."""
+        success = False
+        error_msg = ""
         try:
-            # Assuming GoogleDriveStorageManager handles its own auth flow
-            # We might need to pass the project root or config path if needed
-            gdrive_manager = GoogleDriveStorageManager() 
-            success = gdrive_manager.authenticate() # This might block
-            if success:
-                status_msg = "Google Drive authenticated successfully."
-                self.after(0, self.gdrive_auth_status_var.set, status_msg)
-                self.after(0, messagebox.showinfo, "Success", status_msg, parent=self)
+            # Ensure we have a GDrive manager instance for authentication
+            if not isinstance(get_storage_manager(), GoogleDriveStorageManager):
+                 # Temporarily switch manager for auth if needed, or re-initialize
+                 # This assumes initialize_storage_manager can handle mode switching
+                 initialize_storage_manager(mode="google_drive", path=None) # Path doesn't matter for auth
+            
+            if isinstance(get_storage_manager(), GoogleDriveStorageManager):
+                get_storage_manager().authenticate() # This might block or open browser
+                success = get_storage_manager().is_authenticated()
+                if not success:
+                    error_msg = "Authentication failed or was cancelled."
             else:
-                status_msg = "Google Drive authentication failed or was cancelled."
-                self.after(0, self.gdrive_auth_status_var.set, status_msg)
-                self.after(0, messagebox.showerror, "Error", status_msg, parent=self)
+                error_msg = "Could not switch to Google Drive mode for authentication."
+
         except Exception as e:
-            error_msg = f"Error during Google Drive authentication: {e}"
+            error_msg = f"Authentication error: {e}"
             logging.error(error_msg, exc_info=True)
-            self.after(0, self.gdrive_auth_status_var.set, f"Error: {e}")
-            self.after(0, messagebox.showerror, "Error", error_msg, parent=self)
-        finally:
-            # Re-enable button regardless of outcome
-            self.after(0, self.gdrive_auth_button.configure, state=ctk.NORMAL, text="Authenticate Google Drive")
+
+        # Update UI from the main thread using self.after
+        def update_ui():
+            self.gdrive_auth_button.configure(state=ctk.NORMAL, text="Authenticate Google Drive")
+            if success:
+                self.gdrive_auth_status_var.set("Authenticated Successfully")
+                messagebox.showinfo("Success", "Google Drive authenticated successfully!", parent=self)
+            else:
+                self.gdrive_auth_status_var.set(f"Authentication Failed: {error_msg}")
+                messagebox.showerror("Error", f"Google Drive authentication failed: {error_msg}", parent=self)
+            # Re-initialize storage manager based on the selected mode in the UI
+            # This ensures the correct manager is active after authentication attempt
+            current_mode = self.storage_mode_var.get()
+            current_path = self.local_storage_path_var.get() or None
+            initialize_storage_manager(mode=current_mode, path=current_path)
+            self.toggle_local_path_entry() # Refresh GDrive button state based on final manager
+
+        self.after(0, update_ui)
 
     def run_rag_builder_thread(self):
         """Runs the RAG builder script in a separate thread."""
-        self.rag_build_button.configure(state=ctk.DISABLED, text="Building...")
-        self.rag_build_status_var.set("Starting RAG index build...")
+        if not RAG_BUILDER_AVAILABLE:
+            messagebox.showwarning("RAG Unavailable", "RAG dependencies (chromadb, sentence-transformers/langchain-huggingface) are not installed. Cannot build index.", parent=self)
+            return
+
+        self.rag_build_button.configure(state=ctk.DISABLED, text="Building Index...")
+        self.rag_build_status_var.set("Building... This may take some time.")
         threading.Thread(target=self._rag_build_worker, daemon=True).start()
 
     def _rag_build_worker(self):
-        """Worker function to run the RAG builder script."""
-        script_path = PROJECT_ROOT / "src" / "rag" / "rag_builder.py"
-        python_executable = sys.executable # Use the same python that runs the GUI
+        """Worker function to execute the rag_builder script."""
+        success = False
+        error_msg = ""
         try:
-            logging.info(f"Running RAG builder script: {script_path} with python {python_executable}")
-            # Use subprocess.run for simplicity if detailed output capture isn\'t needed immediately
-            # Set cwd to project root to ensure relative paths in builder work correctly
-            process = subprocess.run(
-                [python_executable, str(script_path)], 
-                capture_output=True, text=True, check=True, cwd=str(PROJECT_ROOT)
-            )
-            logging.info(f"RAG Builder Output:\n{process.stdout}")
-            if process.stderr:
-                 logging.warning(f"RAG Builder Error Output:\n{process.stderr}")
-            status_msg = "RAG index built successfully!"
-            self.after(0, self.rag_build_status_var.set, status_msg)
-            self.after(0, messagebox.showinfo, "Success", status_msg)
-        except subprocess.CalledProcessError as e:
-            error_msg = f"RAG builder script failed with exit code {e.returncode}."
-            logging.error(f"{error_msg}\nOutput:\n{e.stdout}\nError:\n{e.stderr}")
-            self.after(0, self.rag_build_status_var.set, f"Error: {error_msg}")
-            self.after(0, messagebox.showerror, "Error", f"{error_msg}\nSee application logs for details.")
+            script_path = str(PROJECT_ROOT / "src" / "rag" / "rag_builder.py")
+            python_executable = sys.executable # Use the same python that runs the GUI
+            # Use subprocess.run for simplicity if detailed output capture isn't needed immediately
+            # Ensure the working directory is the project root for correct relative paths in the script
+            result = subprocess.run([python_executable, "-m", "src.rag.rag_builder"], 
+                                    capture_output=True, text=True, check=False, cwd=str(PROJECT_ROOT))
+            
+            if result.returncode == 0:
+                success = True
+                logging.info("RAG builder script finished successfully.")
+                logging.info(f"Builder Output:\n{result.stdout}")
+            else:
+                error_msg = f"RAG builder script failed with exit code {result.returncode}."
+                logging.error(error_msg)
+                logging.error(f"Builder Stderr:\n{result.stderr}")
+                logging.error(f"Builder Stdout:\n{result.stdout}")
+                # Try to extract a more specific error from stderr if possible
+                if result.stderr:
+                     error_msg += f" Error: {result.stderr.strip().splitlines()[-1] if result.stderr.strip() else 'Unknown error'}"
+
         except FileNotFoundError:
-            error_msg = f"RAG builder script not found at {script_path}."
+            error_msg = "Error: Python executable or rag_builder.py not found."
             logging.error(error_msg)
-            self.after(0, self.rag_build_status_var.set, f"Error: {error_msg}")
-            self.after(0, messagebox.showerror, "Error", error_msg)
         except Exception as e:
-            error_msg = f"An unexpected error occurred while running the RAG builder: {e}"
-            logging.error(error_msg, exc_info=True)
-            self.after(0, self.rag_build_status_var.set, f"Error: {e}")
-            self.after(0, messagebox.showerror, "Error", f"{error_msg}\nSee application logs for details.")
-        finally:
-            # Re-enable button
-            self.after(0, self.rag_build_button.configure, state=ctk.NORMAL, text="Build / Rebuild RAG Index")
+            error_msg = f"An unexpected error occurred: {e}"
+            logging.exception("Error running RAG builder script:")
+
+        # Update UI from the main thread
+        def update_rag_ui():
+            self.rag_build_button.configure(state=ctk.NORMAL, text="Build / Rebuild RAG Index")
+            if success:
+                self.rag_build_status_var.set("RAG index built successfully!")
+                # Use self.after to schedule the messagebox call in the main thread
+                self.after(0, messagebox.showinfo, "Success", "RAG index built successfully!")
+            else:
+                self.rag_build_status_var.set(f"Error building RAG index. Check logs.")
+                # Use self.after for error messagebox too
+                self.after(0, messagebox.showerror, "Error", f"{error_msg}\nSee application logs for details.")
+
+        self.after(0, update_rag_ui)
 
     def save_and_close(self):
-        """Saves the settings and closes the window."""
-        logging.info("Saving settings...")
+        """Saves settings and closes the window."""
+        self.settings["storage_mode"] = self.storage_mode_var.get()
+        self.settings["local_storage_path"] = self.local_storage_path_var.get() or None # Store None if empty
+        self.settings["llm_model_path"] = self.llm_model_path_var.get() or None
+        self.settings["system_prompt_path"] = self.system_prompt_path_var.get() or None
+        self.settings["active_llm_provider"] = self.active_llm_provider_var.get()
+
+        # Save API provider settings
+        keys_to_save = {}
+        for provider_name, vars_dict in self.provider_vars.items():
+            if provider_name not in self.settings["api_providers"]:
+                 self.settings["api_providers"][provider_name] = {}
+            self.settings["api_providers"][provider_name]["enabled"] = vars_dict["enabled"].get()
+            self.settings["api_providers"][provider_name]["model"] = vars_dict["model"].get()
+            self.settings["api_providers"][provider_name]["endpoint"] = vars_dict["endpoint"].get() or None
+            
+            # Check if a new key was entered
+            new_key = self.provider_key_entry_vars[provider_name].get()
+            if new_key:
+                keys_to_save[provider_name] = new_key
+
         try:
-            # Update settings dictionary from variables
-            self.settings["storage_mode"] = self.storage_mode_var.get()
-            self.settings["local_storage_path"] = self.local_storage_path_var.get() or None
-            self.settings["llm_model_path"] = self.llm_model_path_var.get() or None
-            self.settings["system_prompt_path"] = self.system_prompt_path_var.get() or None
-            self.settings["active_llm_provider"] = self.active_llm_provider_var.get()
-
-            # Update API provider settings
-            for provider_name, vars_dict in self.provider_vars.items():
-                if provider_name not in self.settings["api_providers"]:
-                    self.settings["api_providers"][provider_name] = {}
-                self.settings["api_providers"][provider_name]["enabled"] = vars_dict["enabled"].get()
-                self.settings["api_providers"][provider_name]["model"] = vars_dict["model"].get()
-                self.settings["api_providers"][provider_name]["endpoint"] = vars_dict["endpoint"].get() or None
-
-                # Save API key if entered and SecureStorage is available
-                new_key = self.provider_key_entry_vars[provider_name].get()
-                if new_key and SecureStorage:
-                    try:
-                        SecureStorage.store_key(provider_name, new_key)
-                        logging.info(f"Saved new API key for {provider_name} securely.")
-                    except Exception as e:
-                        logging.error(f"Failed to save API key for {provider_name}: {e}")
-                        messagebox.showerror("Key Storage Error", f"Failed to save API key for {provider_name}: {e}", parent=self)
-                        # Optionally, decide whether to proceed with saving other settings
-
             save_settings(self.settings)
             logging.info("Settings saved successfully.")
-            messagebox.showinfo("Settings Saved", "Settings saved. Restarting backend services...", parent=self)
-            self.parent.restart_backend_thread() # Trigger restart in main window (now threaded)
+            
+            # Save new API keys securely if SecureStorage is available
+            if SecureStorage and keys_to_save:
+                saved_keys_count = 0
+                failed_keys = []
+                for provider_name, key in keys_to_save.items():
+                    try:
+                        SecureStorage.store_key(provider_name, key)
+                        saved_keys_count += 1
+                        logging.info(f"API key for {provider_name} stored securely.")
+                    except Exception as e:
+                        failed_keys.append(provider_name)
+                        logging.error(f"Failed to store API key for {provider_name}: {e}")
+                
+                if saved_keys_count > 0:
+                     messagebox.showinfo("API Keys Saved", f"Successfully saved {saved_keys_count} new API key(s) securely.", parent=self)
+                if failed_keys:
+                     messagebox.showerror("API Key Error", f"Failed to save API key(s) for: {', '.join(failed_keys)}. Secure Storage might be unavailable or misconfigured.", parent=self)
+
+            # Trigger backend restart in the parent window
+            self.parent.restart_backend_thread()
             self.destroy()
         except Exception as e:
-            logging.error(f"Failed to save settings: {e}", exc_info=True)
-            messagebox.showerror("Save Error", f"Failed to save settings: {e}", parent=self)
+            logging.exception("Error saving settings:")
+            messagebox.showerror("Error", f"Failed to save settings: {e}", parent=self)
 
 class MainWindow(ctk.CTk):
-    """Main application window."""
     def __init__(self):
         super().__init__()
+
         self.title("TARVIS-LLM")
         self.geometry("800x600")
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
-
-        # --- Backend Initialization ---
-        self.settings = load_settings()
+        # Initialize backend components
         self.orchestrator = None
-        self.storage_manager = None
-        self.backend_status_var = ctk.StringVar(value="Backend: Initializing...")
-        self.restart_backend_thread() # Initial backend load
+        self.storage_manager = get_storage_manager() # Get initially configured manager
+        self.message_queue = queue.Queue()
 
-        # --- UI Elements ---
-        # Conversation Display
-        self.conversation_display = ctk.CTkTextbox(self, state="disabled", wrap="word", font=("Arial", 12))
-        self.conversation_display.grid(row=0, column=0, padx=20, pady=(20, 10), sticky="nsew")
+        # --- Configure grid layout (2 rows, 2 columns) ---
+        self.grid_rowconfigure(0, weight=1) # Chat history takes most space
+        self.grid_rowconfigure(1, weight=0) # Input area is fixed height
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0) # Settings button column
 
-        # Input Area
+        # --- Chat History (Row 0, Col 0) ---
+        self.chat_history = ctk.CTkTextbox(self, state=ctk.DISABLED, wrap=tk.WORD, font=ctk.CTkFont(size=14))
+        self.chat_history.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="nsew")
+        self.chat_history.tag_config("user", foreground="#007bff") # Blue for user
+        self.chat_history.tag_config("assistant", foreground="#28a745") # Green for assistant
+        self.chat_history.tag_config("error", foreground="#dc3545") # Red for errors
+        self.chat_history.tag_config("info", foreground="gray60") # Gray for info/status
+
+        # --- Settings Button (Row 0, Col 1) ---
+        settings_button = ctk.CTkButton(self, text="⚙️", width=40, command=self.open_settings)
+        settings_button.grid(row=0, column=1, padx=(0, 10), pady=(10, 5), sticky="ne")
+
+        # --- Input Area (Row 1, Col 0 & 1) ---
         input_frame = ctk.CTkFrame(self, fg_color="transparent")
-        input_frame.grid(row=1, column=0, padx=20, pady=(0, 10), sticky="ew")
+        input_frame.grid(row=1, column=0, columnspan=2, padx=10, pady=(5, 10), sticky="ew")
         input_frame.grid_columnconfigure(0, weight=1)
 
-        self.input_entry = ctk.CTkEntry(input_frame, placeholder_text="Enter your command...")
-        self.input_entry.grid(row=0, column=0, padx=(0, 10), sticky="ew")
+        self.input_entry = ctk.CTkEntry(input_frame, placeholder_text="Enter your message...", font=ctk.CTkFont(size=14))
+        self.input_entry.grid(row=0, column=0, padx=(0, 10), pady=5, sticky="ew")
         self.input_entry.bind("<Return>", self.send_message)
 
         self.send_button = ctk.CTkButton(input_frame, text="Send", width=80, command=self.send_message)
-        self.send_button.grid(row=0, column=1)
+        self.send_button.grid(row=0, column=1, pady=5, sticky="e")
 
-        # Status Bar
-        status_bar = ctk.CTkFrame(self, height=30)
-        status_bar.grid(row=2, column=0, padx=0, pady=0, sticky="ew")
-        status_bar.grid_columnconfigure(1, weight=1)
+        # --- Status Bar Area (Below Input) ---
+        status_frame = ctk.CTkFrame(self, fg_color="transparent")
+        status_frame.grid(row=2, column=0, columnspan=2, padx=10, pady=(0, 5), sticky="ew")
+        status_frame.grid_columnconfigure(0, weight=1)
 
-        settings_button = ctk.CTkButton(status_bar, text="⚙️", width=30, command=self.open_settings)
-        settings_button.grid(row=0, column=0, padx=(10, 5), pady=5)
+        self.progress_bar = ctk.CTkProgressBar(status_frame, mode="indeterminate")
+        # Initially hide progress bar
+        # self.progress_bar.grid(row=0, column=0, padx=(0, 10), pady=2, sticky="ew") 
 
-        backend_status_label = ctk.CTkLabel(status_bar, textvariable=self.backend_status_var, anchor="w")
-        backend_status_label.grid(row=0, column=1, padx=(5, 10), pady=5, sticky="ew")
+        self.status_label = ctk.CTkLabel(status_frame, text="Initializing backend...", anchor="w")
+        self.status_label.grid(row=0, column=0, sticky="ew", padx=5) # Changed row to 0
 
-        # --- Load History ---
-        self.load_conversation_history()
+        # --- Load initial history and start backend ---
+        self.load_initial_history()
+        # IMPORTANT: Move backend restart call AFTER all UI elements are created
+        # self.restart_backend_thread() # Initial backend load - MOVED
+        self.after(100, self.restart_backend_thread) # Call after a short delay to ensure UI is fully drawn
 
-        # --- Queue for thread communication ---
-        self.response_queue = queue.Queue()
-        self.after(100, self.process_queue) # Check queue periodically
+        # Start checking the message queue
+        self.after(100, self.check_message_queue)
 
-    def restart_backend_thread(self):
-        """Restarts the backend (Orchestrator, Storage) in a separate thread."""
-        self.backend_status_var.set("Backend: Restarting...")
-        self.input_entry.configure(state=ctk.DISABLED)
-        self.send_button.configure(state=ctk.DISABLED)
-        # Optionally disable settings button during restart?
-        
-        threading.Thread(target=self._restart_backend_worker, daemon=True).start()
-
-    def _restart_backend_worker(self):
-        """Worker function to initialize/re-initialize backend components."""
-        try:
-            logging.info("Restarting backend services...")
-            self.settings = load_settings() # Reload settings
-            self.storage_manager = initialize_storage_manager(self.settings)
-            self.orchestrator = Orchestrator(settings=self.settings) # Pass settings
-            
-            if self.orchestrator and self.orchestrator.llm: # Check if LLM loaded successfully
-                status_msg = "Backend: Ready"
-                logging.info("Backend restarted successfully.")
-                self.after(0, self.input_entry.configure, state=ctk.NORMAL)
-                self.after(0, self.send_button.configure, state=ctk.NORMAL)
-            else:
-                status_msg = "Backend: Error (LLM Failed to Load)"
-                logging.error("Backend restart failed: LLM could not be loaded.")
-                # Keep input disabled if backend failed
-                self.after(0, self.input_entry.configure, state=ctk.DISABLED)
-                self.after(0, self.send_button.configure, state=ctk.DISABLED)
-                self.after(0, messagebox.showerror, "Backend Error", "Failed to initialize the language model. Please check settings and logs.")
-
-            self.after(0, self.backend_status_var.set, status_msg)
-            # Consider reloading history if storage manager changed, but might be complex
-            # self.after(0, self.load_conversation_history)
-
-        except Exception as e:
-            error_msg = f"Backend: Error ({e})"
-            logging.error(f"Critical error during backend restart: {e}", exc_info=True)
-            self.after(0, self.backend_status_var.set, error_msg)
-            self.after(0, self.input_entry.configure, state=ctk.DISABLED)
-            self.after(0, self.send_button.configure, state=ctk.DISABLED)
-            self.after(0, messagebox.showerror, "Backend Error", f"Failed to restart backend: {e}\nCheck logs for details.")
-
-    def load_conversation_history(self):
-        """Loads and displays the conversation history."""
-        if not self.storage_manager:
-            logging.warning("Storage manager not initialized, cannot load history.")
-            return
-            
+    def load_initial_history(self):
         try:
             history = self.storage_manager.load_conversation()
-            self.conversation_display.configure(state="normal")
-            self.conversation_display.delete("1.0", tk.END)
-            for entry in history:
-                speaker = entry.get("speaker", "Unknown")
-                text = entry.get("text", "")
-                self.conversation_display.insert(tk.END, f"{speaker}: {text}\n\n")
-            self.conversation_display.configure(state="disabled")
-            self.conversation_display.see(tk.END) # Scroll to bottom
-            logging.info("Conversation history loaded.")
+            self.chat_history.configure(state=ctk.NORMAL)
+            self.chat_history.delete("1.0", tk.END)
+            for message in history:
+                role = message.get("role", "unknown")
+                content = message.get("content", "")
+                self.display_message(f"{role.capitalize()}: {content}\n\n", role)
+            self.chat_history.configure(state=ctk.DISABLED)
+            self.chat_history.see(tk.END) # Scroll to bottom
+            logging.info("Loaded conversation history.")
         except Exception as e:
             logging.error(f"Failed to load conversation history: {e}", exc_info=True)
-            self.conversation_display.configure(state="normal")
-            self.conversation_display.insert(tk.END, f"\n[Error loading history: {e}]\n")
-            self.conversation_display.configure(state="disabled")
+            self.display_message(f"Error loading history: {e}\n", "error")
 
-    def save_conversation_entry(self, speaker: str, text: str):
-        """Saves a single entry to the conversation history."""
-        if not self.storage_manager:
-            logging.warning("Storage manager not initialized, cannot save history.")
-            return
-        try:
-            self.storage_manager.save_conversation_entry(speaker, text)
-        except Exception as e:
-            logging.error(f"Failed to save conversation entry: {e}", exc_info=True)
-            # Optionally show a non-blocking error in the UI
-            self.display_message("System", f"[Error saving history: {e}]")
-
-    def display_message(self, speaker: str, text: str):
-        """Appends a message to the conversation display."""
-        self.conversation_display.configure(state="normal")
-        self.conversation_display.insert(tk.END, f"{speaker}: {text}\n\n")
-        self.conversation_display.configure(state="disabled")
-        self.conversation_display.see(tk.END) # Scroll to bottom
+    def display_message(self, message, tag):
+        """Appends a message to the chat history with a specific tag."""
+        self.chat_history.configure(state=ctk.NORMAL)
+        self.chat_history.insert(tk.END, message, tag)
+        self.chat_history.configure(state=ctk.DISABLED)
+        self.chat_history.see(tk.END) # Auto-scroll
 
     def send_message(self, event=None):
-        """Handles sending the user input to the backend."""
         user_input = self.input_entry.get().strip()
-        if not user_input:
+        if not user_input or self.orchestrator is None:
+            if not user_input:
+                logging.warning("Attempted to send empty message.")
+            if self.orchestrator is None:
+                 logging.warning("Orchestrator not ready, cannot send message.")
+                 self.display_message("Backend not ready. Please wait.\n", "error")
             return
-            
-        if not self.orchestrator or not self.orchestrator.llm:
-             messagebox.showerror("Backend Error", "Backend is not ready or LLM failed to load. Cannot send message.")
-             return
 
-        self.display_message("User", user_input)
-        self.save_conversation_entry("User", user_input)
+        self.display_message(f"User: {user_input}\n\n", "user")
         self.input_entry.delete(0, tk.END)
+
+        # Disable input and show progress
         self.input_entry.configure(state=ctk.DISABLED)
         self.send_button.configure(state=ctk.DISABLED)
-        self.backend_status_var.set("Backend: Processing...")
+        self.progress_bar.grid(row=0, column=0, padx=(0, 10), pady=2, sticky="ew") # Show progress bar
+        self.progress_bar.start()
+        self.status_label.configure(text="Assistant is thinking...")
 
-        # Start processing in a separate thread
+        # Run orchestrator in a separate thread
         threading.Thread(target=self._process_input_thread, args=(user_input,), daemon=True).start()
 
-    def _process_input_thread(self, user_input: str):
-        """Worker thread to get response from orchestrator."""
+    def _process_input_thread(self, user_input):
         try:
+            response_stream = self.orchestrator.process_input_stream(user_input)
             full_response = ""
-            # Use streaming response
-            for chunk in self.orchestrator.route_command_stream(user_input):
-                self.response_queue.put(chunk) # Put chunk in queue for main thread
+            self.message_queue.put(("start_stream", None))
+            for chunk in response_stream:
+                self.message_queue.put(("stream_chunk", chunk))
                 full_response += chunk
-            
-            # Signal end of response (e.g., with a special marker or None)
-            self.response_queue.put(None) 
-            # Save the complete response once streaming is finished
-            self.save_conversation_entry("AI", full_response.strip())
-
+            self.message_queue.put(("end_stream", full_response))
         except Exception as e:
-            error_msg = f"Error getting response from backend: {e}"
-            logging.error(error_msg, exc_info=True)
-            self.response_queue.put(f"\n[Error: {e}]\n")
-            self.response_queue.put(None) # Signal end even on error
-            self.save_conversation_entry("System", f"[Error processing input: {e}]")
+            logging.exception("Error processing input:")
+            self.message_queue.put(("error", f"Error: {e}"))
 
-    def process_queue(self):
-        """Processes messages from the response queue in the main thread."""
+    def check_message_queue(self):
         try:
-            while True: # Process all available messages
-                chunk = self.response_queue.get_nowait()
-                if chunk is None: # End of response signal
+            while True:
+                message_type, data = self.message_queue.get_nowait()
+                if message_type == "start_stream":
+                    self.display_message("Assistant: ", "assistant")
+                elif message_type == "stream_chunk":
+                    self.display_message(data, "assistant")
+                elif message_type == "end_stream":
+                    self.display_message("\n\n", "assistant") # Add spacing after response
+                    # Re-enable input and hide progress
                     self.input_entry.configure(state=ctk.NORMAL)
                     self.send_button.configure(state=ctk.NORMAL)
-                    self.backend_status_var.set("Backend: Ready")
-                    # Add a final newline for spacing if needed, after AI response is fully displayed
-                    self.conversation_display.configure(state="normal")
-                    # Check if last char is already newline, avoid double newline
-                    if self.conversation_display.get("end-2c", "end-1c") != "\n":
-                        self.conversation_display.insert(tk.END, "\n")
-                    self.conversation_display.configure(state="disabled")
-                    self.conversation_display.see(tk.END)
-                    break # Exit loop for this cycle once None is received
-                else:
-                    # Append chunk to display
-                    self.conversation_display.configure(state="normal")
-                    self.conversation_display.insert(tk.END, chunk)
-                    self.conversation_display.configure(state="disabled")
-                    self.conversation_display.see(tk.END) # Keep scrolling
-
+                    self.progress_bar.stop()
+                    self.progress_bar.grid_forget() # Hide progress bar
+                    self.status_label.configure(text="Ready")
+                    # Save conversation after full response
+                    self.storage_manager.save_conversation(self.orchestrator.get_conversation_history())
+                elif message_type == "error":
+                    self.display_message(f"{data}\n\n", "error")
+                    # Re-enable input even on error
+                    self.input_entry.configure(state=ctk.NORMAL)
+                    self.send_button.configure(state=ctk.NORMAL)
+                    self.progress_bar.stop()
+                    self.progress_bar.grid_forget()
+                    self.status_label.configure(text="Error occurred. Ready.")
         except queue.Empty:
-            pass # No messages in queue, do nothing
+            pass # No messages
         finally:
-            # Schedule the next check
-            self.after(100, self.process_queue)
+            # Check again after 100ms
+            self.after(100, self.check_message_queue)
 
     def open_settings(self):
-        """Opens the settings window."""
-        # Check if already open?
         if hasattr(self, "settings_window") and self.settings_window.winfo_exists():
             self.settings_window.focus()
         else:
             self.settings_window = SettingsWindow(self)
-            self.settings_window.focus()
+
+    def restart_backend_thread(self):
+        """Starts the backend restart process in a separate thread."""
+        logging.info("Restarting backend...")
+        self.status_label.configure(text="Restarting backend...")
+        # Disable input during restart
+        if hasattr(self, 'input_entry'): # Check if widget exists before configuring
+             self.input_entry.configure(state=ctk.DISABLED)
+        if hasattr(self, 'send_button'):
+             self.send_button.configure(state=ctk.DISABLED)
+        if hasattr(self, 'progress_bar'):
+             self.progress_bar.grid(row=0, column=0, padx=(0, 10), pady=2, sticky="ew")
+             self.progress_bar.start()
+        
+        threading.Thread(target=self._restart_backend_worker, daemon=True).start()
+
+    def _restart_backend_worker(self):
+        """Worker function to initialize/re-initialize the orchestrator."""
+        success = False
+        error_msg = ""
+        try:
+            # Re-initialize storage manager based on potentially updated settings
+            self.storage_manager = initialize_storage_manager()
+            # Load history using the potentially new storage manager
+            # We need to update the UI from the main thread
+            self.after(0, self.load_initial_history)
+
+            # Initialize Orchestrator
+            self.orchestrator = Orchestrator()
+            if self.orchestrator.is_ready():
+                success = True
+                logging.info("Backend restarted successfully.")
+            else:
+                error_msg = "Orchestrator failed to initialize. LLM might not have loaded. Check logs."
+                logging.error(error_msg)
+                self.orchestrator = None # Ensure orchestrator is None if not ready
+        except Exception as e:
+            error_msg = f"Failed to restart backend: {e}"
+            logging.exception(error_msg)
+            self.orchestrator = None # Ensure orchestrator is None on error
+
+        # Update UI from the main thread
+        def update_status():
+            if hasattr(self, 'progress_bar'): # Check if widget exists
+                 self.progress_bar.stop()
+                 self.progress_bar.grid_forget()
+            if success:
+                self.status_label.configure(text="Backend ready.")
+                if hasattr(self, 'input_entry'):
+                     self.input_entry.configure(state=ctk.NORMAL)
+                if hasattr(self, 'send_button'):
+                     self.send_button.configure(state=ctk.NORMAL)
+            else:
+                self.status_label.configure(text=f"Backend Error: {error_msg}")
+                # Keep input disabled if backend failed
+                if hasattr(self, 'input_entry'):
+                     self.input_entry.configure(state=ctk.DISABLED)
+                if hasattr(self, 'send_button'):
+                     self.send_button.configure(state=ctk.DISABLED)
+                self.display_message(f"CRITICAL ERROR: Backend failed to initialize. Please check settings and logs. {error_msg}\n", "error")
+
+        self.after(0, update_status)
 
 if __name__ == "__main__":
     ctk.set_appearance_mode("System") # Modes: "System" (default), "Dark", "Light"
