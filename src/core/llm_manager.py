@@ -39,6 +39,7 @@ class LLMLoader:
         # --- Performance/Configuration Settings ---
         self.use_gpu = os.getenv("USE_GPU") == "1"
         # Read N_GPU_LAYERS, default to 0 (no layers offloaded)
+        # Keep reading it for logging, but it won't be passed to GPT4All directly
         try:
             self.n_gpu_layers = int(os.getenv("N_GPU_LAYERS", 0))
             if self.n_gpu_layers < 0:
@@ -77,7 +78,7 @@ class LLMLoader:
         # Log final configuration
         logging.info(
             f"LLMLoader Initialized: Model={self.model_name}, Path={self.model_path}, "
-            f"Use GPU={self.use_gpu}, GPU Layers={self.n_gpu_layers}, "
+            f"Use GPU={self.use_gpu}, GPU Layers Setting={self.n_gpu_layers} (Note: n_gpu_layers not passed directly to GPT4All), "
             f"Use MLock={self.use_mlock}, Quant Preference='{self.quant_preference}'"
         )
 
@@ -98,11 +99,9 @@ class LLMLoader:
                 local_dir=str(model_dir),
                 local_dir_use_symlinks=False, # Download the actual file
                 resume_download=True,
-                # Progress bar is usually handled automatically by huggingface_hub if tqdm is installed
             )
             logging.info(f"Model downloaded successfully to {downloaded_path}")
             print(f"INFO: Model downloaded successfully to {downloaded_path}")
-            # Verify the downloaded path matches expected path
             if Path(downloaded_path) != Path(self.model_path):
                 logging.warning(f"Downloaded path {downloaded_path} differs from expected {self.model_path}. Adjusting internal path.")
                 self.model_path = str(downloaded_path)
@@ -124,85 +123,65 @@ class LLMLoader:
         model_file_path = Path(self.model_path)
         model_dir = model_file_path.parent
 
-        # Check if the model exists
         if not model_file_path.exists():
             logging.warning(f"Model file not found at {self.model_path}.")
-
-            # Determine if this is a default path or a custom path
             settings = load_settings()
             custom_model_path_setting = settings.get("llm_model_path")
             is_default_path = not custom_model_path_setting or not Path(custom_model_path_setting).is_file()
 
             if is_default_path and self.model_name in SUPPORTED_QUANTS.values():
-                # Attempt to download the selected default model
                 if not self._download_default_model(model_dir):
-                    return None # Download failed
-                # Update model_file_path in case download adjusted self.model_path
+                    return None
                 model_file_path = Path(self.model_path)
             else:
-                # Custom path specified but file not found, or not a downloadable default model
                 error_msg = f"Model file not found at specified path {self.model_path}. Please ensure the file exists or configure the correct path in settings."
                 logging.error(error_msg)
                 print(f"ERROR: {error_msg}")
                 return None
 
-        # Proceed with loading the model if it exists (either initially or after download)
         if model_file_path.exists():
             try:
-                logging.info(f"Attempting to load model: {self.model_path} with {self.n_gpu_layers} GPU layers and mlock={self.use_mlock}")
-
-                # Determine device based on n_gpu_layers
-                # llama.cpp backend often handles device automatically when n_gpu_layers > 0
-                # Setting device explicitly might conflict, let's rely on n_gpu_layers
-                # device_setting = "gpu" if self.n_gpu_layers > 0 else "cpu"
-                # logging.info(f"Setting device based on n_gpu_layers: {device_setting}")
-
+                # Determine device based on USE_GPU setting
+                device_setting = "gpu" if self.use_gpu else "cpu"
+                logging.info(f"Attempting to load model: {self.model_path} with device='{device_setting}' and mlock={self.use_mlock}")
+                # Note: n_gpu_layers is removed as it's not supported by GPT4All directly anymore.
+                # GPU offloading might be handled internally by llama.cpp based on device or other backend settings.
                 llm = GPT4All(
                     model=self.model_path,
-                    # device=device_setting, # Let llama.cpp handle device based on n_gpu_layers
-                    n_gpu_layers=self.n_gpu_layers,
+                    device=device_setting, # Use device setting
+                    # n_gpu_layers=self.n_gpu_layers, # REMOVED - Causes validation error
                     use_mlock=self.use_mlock,
-                    n_threads=int(os.getenv("N_THREADS", 8)), # Keep configurable thread count
-                    verbose=True # Enable backend logging
+                    n_threads=int(os.getenv("N_THREADS", 8)),
+                    verbose=True
                 )
                 logging.info("LLM loaded successfully.")
                 return llm
             except Exception as e:
                 logging.error(f"Failed to load LLM: {e}", exc_info=True)
-                if self.n_gpu_layers > 0:
-                    logging.warning("GPU loading failed (n_gpu_layers > 0). Ensure CUDA/ROCm drivers and compatible llama-cpp-python are installed.")
+                if self.use_gpu:
+                    logging.warning("GPU loading failed (device='gpu'). Ensure CUDA/ROCm drivers and compatible llama-cpp-python are installed and backend supports GPU.")
                 print(f"ERROR: Failed to load LLM - {e}")
                 return None
         else:
-            # Should not happen if download logic is correct, but as a fallback
             logging.error(f"Model file still not found at {self.model_path} after download attempt.")
             return None
 
 # Example usage (for testing purposes)
 if __name__ == "__main__":
     print("Testing LLMLoader with new optimizations...")
-    # Ensure .env is in the parent directory relative to this script if run directly
-    # Or rely on it being in the project root when run as part of the application
     loader = LLMLoader()
     print(f"Model path determined as: {loader.model_path}")
     print(f"Model Name: {loader.model_name}")
-    print(f"Use GPU: {loader.use_gpu}")
-    print(f"GPU Layers: {loader.n_gpu_layers}")
+    print(f"Use GPU Setting: {loader.use_gpu}")
+    print(f"GPU Layers Setting (Informational): {loader.n_gpu_layers}")
     print(f"Use MLock: {loader.use_mlock}")
     print(f"Quant Preference: {loader.quant_preference}")
     print(f"Checking if model exists at path: {os.path.exists(loader.model_path)}")
 
-    # Note: The actual loading test requires the model file to be present
     # print("\nAttempting to load LLM instance (requires model file)...")
     # llm_instance = loader.load()
     # if llm_instance:
     #     print("LLM Instance loaded successfully.")
-    #     # Example query (optional, requires model download)
-    #     # try:
-    #     #     response = llm_instance.invoke("Explain the concept of GPU offloading in LLMs.")
-    #     #     print(f"Test query response: {response}")
-    #     # except Exception as e:
-    #     #     print(f"Error during test query: {e}")
     # else:
     #     print("Failed to load LLM instance.")
     print("\nLLMLoader test script finished. Manual check required if model file exists.")
