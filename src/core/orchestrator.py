@@ -2,7 +2,8 @@ import os
 import logging
 from pathlib import Path
 from langchain.agents import Tool, initialize_agent, AgentType
-from langchain.chains.conversation.memory import ConversationBufferMemory
+# Updated import
+from langchain.memory import ConversationBufferWindowMemory 
 from langchain.prompts import SystemMessagePromptTemplate, HumanMessagePromptTemplate, ChatPromptTemplate
 from langchain.schema import SystemMessage # Import SystemMessage
 from dotenv import load_dotenv
@@ -19,7 +20,9 @@ from .storage_manager import load_settings # Import load_settings
 # Load environment variables
 load_dotenv()
 
-# Configure logginglogging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 class Orchestrator:
     """Manages the interaction flow, loading the LLM and routing commands to appropriate skills."""
 
@@ -36,7 +39,21 @@ class Orchestrator:
             return
 
         self.tools = self._load_tools()
-        self.memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+        
+        # Get context window size from environment variable, default to 5 turns (10 messages)
+        try:
+            self.max_context_turns = int(os.getenv("MAX_CONTEXT_TURNS", 5))
+            if self.max_context_turns <= 0:
+                self.max_context_turns = 5 # Ensure positive value
+        except ValueError:
+            self.max_context_turns = 5
+        logging.info(f"Using conversation memory window size (k): {self.max_context_turns * 2}")
+        # Updated memory type with window size (k is number of messages, so turns * 2)
+        self.memory = ConversationBufferWindowMemory(
+            memory_key="chat_history", 
+            return_messages=True, 
+            k=self.max_context_turns * 2 
+        )
         
         # Load and prepare the system prompt
         system_prompt_content = self._load_system_prompt()
@@ -79,10 +96,17 @@ class Orchestrator:
             logging.info(f"Using default system prompt from: {prompt_path}")
 
         try:
+            # Ensure prompts directory exists
+            prompt_path.parent.mkdir(parents=True, exist_ok=True)
+            if not prompt_path.exists():
+                 logging.warning(f"Prompt file {prompt_path} not found. Creating with default content.")
+                 with open(prompt_path, "w", encoding="utf-8") as f:
+                     f.write("You are Jarvis, a helpful AI assistant. Respond concisely and accurately.")
+            
             with open(prompt_path, "r", encoding="utf-8") as f:
                 return f.read()
         except Exception as e:
-            logging.error(f"Failed to read system prompt file {prompt_path}: {e}. Using fallback prompt.")
+            logging.error(f"Failed to read or create system prompt file {prompt_path}: {e}. Using fallback prompt.")
             return "You are a helpful AI assistant." # Basic fallback prompt
 
     def _load_tools(self):
